@@ -1,0 +1,2244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0">
+  <title>HPVH Schedule</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #f0f4f8; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    #root { min-height: 100vh; }
+    #loading-screen {
+      position: fixed; inset: 0; background: #0f172a;
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px;
+      z-index: 99999;
+    }
+    #loading-screen .paw {
+      width: 40px; height: 40px; border-radius: 10px;
+      background: linear-gradient(135deg, #3b82f6, #06b6d4);
+      display: flex; align-items: center; justify-content: center; font-size: 24px;
+    }
+    #loading-screen p { color: #475569; font-size: 11px; }
+    #loading-screen h2 { color: #f8fafc; font-size: 16px; font-weight: 800; }
+  </style>
+</head>
+<body>
+
+  <div id="loading-screen">
+    <div class="paw">&#128062;</div>
+    <h2>HPVH Schedule</h2>
+    <p>Loading&hellip;</p>
+  </div>
+
+  <div id="root"></div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+
+  <script type="text/babel" data-presets="react">
+// React hooks from global
+const { useState, useEffect, useRef, useMemo, useCallback } = React;
+
+/* ══ GAS BACKEND CONFIG ═════════════════════════════════════════════ */
+const GAS_URL = "https://script.google.com/macros/s/AKfycbx-VkYqzy41XRYN1xFhdNp55oeES0ShIZR4jesFQzKR3Dd2GUNawndngkpiLIp4oZG1dg/exec";
+const GOOGLE_CLIENT_ID = "347033657889-06ml14nvvqtllcrkjnaufamiqqma5am7.apps.googleusercontent.com";
+const POLL_INTERVAL_MS = 12000; // Check for remote changes every 12 seconds
+
+/* ══ GAS API LAYER ══════════════════════════════════════════════════ */
+// All calls to the GAS backend go through gasCall().
+// token = the Google ID token for the current session.
+// action = what to do, payload = JSON args.
+async function gasCall(token, action, payload = {}) {
+  const params = new URLSearchParams({
+    action,
+    token,
+    payload: JSON.stringify(payload),
+  });
+  const res = await fetch(`${GAS_URL}?${params}`);
+  if (!res.ok) throw new Error(`Network error ${res.status}`);
+  const data = await res.json();
+  if (!data.ok) throw new Error(data.error || "Unknown GAS error");
+  return data;
+}
+
+// Convenience wrappers used throughout the app
+const gasValidateEmail  = (token)          => gasCall(token, "validateEmail");
+const gasValidatePin    = (token, pin)     => gasCall(token, "validatePin",     { pin });
+const gasGetSchedule    = (token)          => gasCall(token, "getSchedule",     {});
+const gasSaveSchedule   = (token, changes) => gasCall(token, "saveSchedule",    { changes });
+const gasGetLastMod     = (token)          => gasCall(token, "getLastModified", {});
+const gasAddAudit       = (token, entry)   => gasCall(token, "addAuditEntry",   { entry });
+const gasSaveSettings   = (token, settings)=> gasCall(token, "saveSettings",    { settings });
+
+/* ══ CONSTANTS ══════════════════════════════════════════════════════ */
+const DEFAULT_LOCK_MS = 5*60*1000;
+const DAYS = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
+const GROUPS = ["Tech","VA","CCR"];
+const WD_PRE = [["7:30-2:30","8-2","12-7","2-8"],["7:30-3:30","8-4","1-7","12-8"]];
+const SA_PRE = [["8:30-4:30"]];
+const MON = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const HR = {"7:30-2:30":7,"8-2":6,"12-7":7,"2-8":6,"7:30-3:30":8,"8-4":8,"1-7":6,"12-8":8,"8:30-4:30":8,"7:30-2":6.5};
+const MIN_CAL = new Date(2026,0,1);
+const REQ_TYPES = {
+  MORNING_2:{l:"Morning (end 2pm)",t:"7:30-2",s:"AM→2"},
+  MORNING_4:{l:"Morning (end 3:30-4pm)",t:"7:30-3:30",s:"AM→4"},
+  EVE_12:   {l:"Evening (Start 12pm)",t:"12-8",s:"PM@12"},
+  EVE_2:    {l:"Evening (Start 2pm)",t:"2-8",s:"PM@2"},
+  VACATION: {l:"Vacation",t:null,s:"VAC"},
+  CUSTOM:   {l:"Custom",t:null,s:"?"},
+};
+const TAG_CFG = {
+  ADMIN:    {l:"🎯 Admin",c:"#4f46e5",bg:"#ede9fe",lbl:"ADM"},
+  INVENTORY:{l:"📦 Inventory",c:"#15803d",bg:"#dcfce7",lbl:"INV"},
+  COVER:    {l:"🔄 Cover",c:"#0369a1",bg:"#e0f2fe",lbl:"CVR"},
+};
+const LOCK_OPTIONS = [
+  {label:"2 min",ms:2*60*1000},{label:"5 min",ms:5*60*1000},
+  {label:"10 min",ms:10*60*1000},{label:"15 min",ms:15*60*1000},
+  {label:"30 min",ms:30*60*1000},{label:"60 min",ms:60*60*1000},
+];
+const TO_COL_W = 46;
+
+/* ══ COLOURS ════════════════════════════════════════════════════════ */
+const BG="#f0f4f8"; const NAV="#1e293b";
+const DEF = {
+  Tech:{cbg:"#dcfce7",cbo:"#86efac",ctx:"#14532d",acc:"#16a34a",gbg:"#f0fdf4",htx:"#15803d"},
+  VA:  {cbg:"#e0e7ff",cbo:"#a5b4fc",ctx:"#1e1b4b",acc:"#4f46e5",gbg:"#eef2ff",htx:"#4338ca"},
+  CCR: {cbg:"#fef9c3",cbo:"#fde047",ctx:"#713f12",acc:"#d97706",gbg:"#fefce8",htx:"#b45309"},
+  VAC:   {bg:"#fef3c7",bo:"#f59e0b",tx:"#78350f"},
+  OFF:   {bg:"#d1d5db",bo:"#9ca3af",tx:"#374151"},
+  CLOSED:{bg:"#9ca3af",bo:"#6b7280",tx:"#1f2937"},
+  SICK:  {bg:"#fee2e2",bo:"#f87171",tx:"#991b1b"},
+  CUSTOM:{bg:"#f0e6ff",bo:"#c084fc",tx:"#581c87"},
+};
+const EC = {bg:"#f8fafc",bo:"#e2e8f0"};
+const PEND_CLR = {bg:"#fef3c7",bo:"#f59e0b",tx:"#92400e"};
+const SWAP_CLR = {bg:"#ede9fe",bo:"#a78bfa",tx:"#4c1d95"};
+const CSS=`*{scrollbar-width:thin;scrollbar-color:#94a3b8 #e2e8f0}::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-track{background:#e2e8f0;border-radius:3px}::-webkit-scrollbar-thumb{background:#94a3b8;border-radius:3px}`;
+
+/* ══ UTILS ══════════════════════════════════════════════════════════ */
+const toH = t => {
+  if (!t) return 0; if (HR[t]!==undefined) return HR[t];
+  try { const [a,b]=t.split("-"); const p=s=>{s=s.trim();return s.includes(":")?+s.split(":")[0]+ +s.split(":")[1]/60:+s;}; let [st,en]=[p(a),p(b)]; if(en<st)en+=12; return +((en-st).toFixed(1))||0; } catch{return 0;}
+};
+const mk=(t="",st=null)=>({t,h:t?toH(t):0,st,tg:[],sh:null,rc:null,reqId:null,reqSt:null,swapped:false,swapPending:false,customLabel:null});
+const mkCl=()=>({t:"",h:0,st:"CLOSED",tg:[],sh:null,rc:null,reqId:null,reqSt:null,swapped:false,swapPending:false,customLabel:null});
+let _u=900; const uid=()=>`u${++_u}`;
+const deepClone=o=>JSON.parse(JSON.stringify(o));
+const eTotal=e=>e.shifts.reduce((a,s)=>{if(!s||["VAC","OFF","CLOSED","CUSTOM"].includes(s.st))return a;if(s.st==="SICK")return a+(s.sh!==null?+s.sh:0);return a+s.h;},0);
+const nextDates=prev=>{const last=[...prev].reverse().find(Boolean);if(!last)return Array(7).fill("");const[d,m]=last.split("-");let dt=new Date(2026,MON.indexOf(m),+d);return Array(7).fill(0).map(()=>{dt=new Date(dt.getTime()+86400000);return`${dt.getDate()}-${MON[dt.getMonth()]}`;});};
+const wkLabel=dates=>{const v=dates.filter(Boolean);if(!v.length)return"New Week";const[fd,fm]=v[0].split("-"),[ld,lm]=v[v.length-1].split("-");return fm===lm?`${fm} ${fd}–${ld}`:`${fd}-${fm} – ${ld}-${lm}`;};
+const monthYear=wk=>{const f=wk.dates.find(Boolean);if(!f)return"Unknown";const[,m]=f.split("-");return`${m} 2026`;};
+const parseDate=dt=>{if(!dt)return new Date(9999,0,1);const[d,m]=dt.split("-");return new Date(2026,MON.indexOf(m),+d);};
+const sortWeeks=arr=>[...arr].sort((a,b)=>parseDate(a.dates.find(Boolean))-parseDate(b.dates.find(Boolean)));
+const nowTs=()=>{const d=new Date();return`${MON[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()} ${d.getHours()}:${String(d.getMinutes()).padStart(2,"0")}`;};
+const todayStr=()=>{const d=new Date();return`${MON[d.getMonth()]} ${d.getDate()}`;};
+
+function getCalDates(calStart){
+  const y=calStart.getFullYear(),mo=calStart.getMonth();
+  const first=new Date(y,mo,1);const dow=first.getDay();const back=dow===0?6:dow-1;
+  const start=new Date(y,mo,1-back);const dates=[];const cur=new Date(start);
+  for(let i=0;i<42;i++){dates.push(`${cur.getDate()}-${MON[cur.getMonth()]}`);cur.setDate(cur.getDate()+1);}
+  return dates;
+}
+const getC=(s,g,C)=>{
+  if(s?.reqSt==="PENDING"){if(s.st==="VAC")return PEND_CLR;const eg=s?.rc||g||"Tech";const c=C[eg]||DEF.Tech;return{bg:c.cbg,bo:c.cbo,tx:c.ctx};}
+  if(s?.swapped){const eg=s?.swapFromGroup||s?.rc||g||"Tech";const c=C[eg]||DEF[eg]||DEF.Tech;return{bg:c.cbg,bo:c.cbo,tx:c.ctx};}
+  if(s?.swapPending&&!s?.swapped)return{bg:"#faf5ff",bo:"#a78bfa",tx:"#4c1d95"};
+  if(s?.st==="CUSTOM"){const cc=C.CUSTOM||DEF.CUSTOM;return{bg:cc.bg,bo:cc.bo,tx:cc.tx};}
+  const eg=s?.rc||g||"Tech";if(s?.st&&C[s.st])return C[s.st];if(s?.t){const c=C[eg]||DEF.Tech;return{bg:c.cbg,bo:c.cbo,tx:c.ctx};}return EC;
+};
+function dateInPP(dt,mi,period){if(!dt)return false;const[d,m]=dt.split("-");const mo=MON.indexOf(m);const day=+d;if(period===1){const prev=mi===0?11:mi-1;return(mo===mi&&day<=14)||(mo===prev&&day>=30);}return mo===mi&&day>=15;}
+function ppLabel(mi,period){const prev=mi===0?11:mi-1;if(period===1)return`${MON[prev]} 30–${MON[mi]} 14`;const last=new Date(2026,mi+1,0).getDate();return`${MON[mi]} 15–${MON[mi]} ${last}`;}
+function getOrder(weeks){const seen=new Set();const out=[];weeks.forEach(w=>GROUPS.forEach(g=>(w.groups[g]||[]).forEach(e=>{const k=`${e.name}||${g}`;if(!seen.has(k)){seen.add(k);out.push({name:e.name,group:g});}})));return out;}
+const maskPin=pin=>pin?pin.replace(/./g,"●"):"";
+function getLiveDates(liveWeeks){const s=new Set();liveWeeks.forEach(w=>w.dates.forEach(d=>{if(d)s.add(d);}));return s;}
+function datesOverlap(newDates,weekPool){const existing=new Set();weekPool.forEach(w=>w.dates.forEach(d=>{if(d)existing.add(d);}));return newDates.some(d=>d&&existing.has(d));}
+
+/* ══ COVERAGE FLAGS ─────────────────────────────────────────────── */
+function checkCoverage(week){
+  const flags=[];
+  const dayOfWeek=dt=>{if(!dt)return-1;const d=parseDate(dt);return d.getDay()===0?6:d.getDay()-1;};
+  week.dates.forEach((dt,di)=>{
+    if(!dt||di===6)return;
+    const dow=dayOfWeek(dt);const dayLabel=`${DAYS[di]} ${dt}`;
+    const techShifts=(week.groups.Tech||[]).map(e=>e.shifts[di]).filter(s=>s&&!["VAC","OFF","CLOSED","SICK","CUSTOM"].includes(s.st)&&s.t);
+    const ccrShifts=(week.groups.CCR||[]).map(e=>e.shifts[di]).filter(s=>s&&!["VAC","OFF","CLOSED","SICK","CUSTOM"].includes(s.st)&&s.t);
+    const startHour=t=>{if(!t)return 99;const p=t.split("-")[0].trim();return p.includes(":")?+p.split(":")[0]+ +p.split(":")[1]/60:+p;};
+    const endHour=t=>{if(!t)return 0;const p=t.split("-")[1]?.trim()||"";return p.includes(":")?+p.split(":")[0]+ +p.split(":")[1]/60:+p;};
+    const techStarts=techShifts.map(s=>startHour(s.t));const techEnds=techShifts.map(s=>endHour(s.t));
+    const ccrStarts=ccrShifts.map(s=>startHour(s.t));
+    if(techShifts.length<2)flags.push({day:dayLabel,di,group:"Tech",msg:"Fewer than 2 Techs scheduled"});
+    else{
+      if(!techStarts.some(h=>h<=8))flags.push({day:dayLabel,di,group:"Tech",msg:"No Tech starting at or before 8:00 AM"});
+      if(!techEnds.some(h=>h>=20))flags.push({day:dayLabel,di,group:"Tech",msg:"No Tech finishing at or after 8:00 PM"});
+      if(!techStarts.some(h=>h<=7.5))flags.push({day:dayLabel,di,group:"Tech",msg:"No Tech starting at 7:30"});
+    }
+    if(ccrShifts.length<2)flags.push({day:dayLabel,di,group:"CCR",msg:"Fewer than 2 CCRs scheduled"});
+    else{
+      const has730=ccrStarts.filter(h=>h<=7.5).length;const has800=ccrStarts.some(h=>h>=7.51&&h<=8.01);
+      const has12=ccrStarts.some(h=>h>=11.99&&h<=12.01);const hasEve=ccrStarts.some(h=>h>=12);
+      if(dow===0){if(has730<2)flags.push({day:dayLabel,di,group:"CCR",msg:"Monday requires 2 × 7:30 CCR starters"});}
+      else{if(has730<1)flags.push({day:dayLabel,di,group:"CCR",msg:"No CCR starting at 7:30"});}
+      if(!has800)flags.push({day:dayLabel,di,group:"CCR",msg:"No CCR starting at 8:00 AM"});
+      if(!has12)flags.push({day:dayLabel,di,group:"CCR",msg:"No CCR starting at 12:00 PM"});
+      if(!hasEve)flags.push({day:dayLabel,di,group:"CCR",msg:"No evening CCR (12:00 PM or later start)"});
+    }
+  });
+  return flags;
+}
+
+/* ══ INITIAL DATA ═══════════════════════════════════════════════════ */
+const IW=[
+  {id:"w1",label:"Apr 20–26",dates:["20-Apr","21-Apr","22-Apr","23-Apr","24-Apr","25-Apr","26-Apr"],approved:true,groups:{
+    Tech:[{id:"t1",name:"Sally",shifts:[mk("12-7"),mk("12-7"),mk("7:30-2:30"),mk("7:30-2:30"),mk("12-7"),mk("","OFF"),mkCl()]},{id:"t2",name:"Kira",shifts:[mk("8-4"),mk("8-4"),mk("8-4"),mk("2-8"),mk("2-8"),mk("","OFF"),mkCl()]},{id:"t3",name:"Tanya",shifts:[mk("","VAC"),mk("2-8"),mk("12-8"),mk("8-4"),mk("","OFF"),mk("8:30-4:30"),mkCl()]},{id:"t4",name:"Katy",shifts:[mk("7:30-2:30"),mk("7:30-2:30"),mk("12-8"),mk("12-7"),mk("7:30-2:30"),mk("","VAC"),mkCl()]},{id:"t5",name:"Danielle",shifts:[mk("12-7"),mk("8-2"),mk("","VAC"),mk("8-2"),mk("8-2"),mk("","OFF"),mkCl()]}],
+    VA:[{id:"v1",name:"Catherine",shifts:[mk("8-4"),mk("8-4"),mk("7:30-2:30"),mk("7:30-2:30"),mk("2-8"),mk("","OFF"),mkCl()]},{id:"v2",name:"Felicity",shifts:[mk("8-4"),mk("2-8"),mk("12-7"),mk("","OFF"),mk("8-4"),mk("8:30-4:30"),mkCl()]},{id:"v3",name:"Greta",shifts:[mk("7:30-2:30"),mk("12-8"),mk("2-8"),mk("12-8"),mk("7:30-2:30"),mk("","OFF"),mkCl()]},{id:"v4",name:"Belle",shifts:[mk("12-8"),mk("7:30-2:30"),mk("8-4"),mk("12-8"),mk("","OFF"),mk("8:30-4:30"),mkCl()]}],
+    CCR:[{id:"c1",name:"Kath",shifts:[mk("8-4"),mk("7:30-2:30"),mk("12-8"),mk("8-4"),mk("7:30-2:30"),mk("","OFF"),mkCl()]},{id:"c2",name:"Hanna",shifts:[mk("7:30-2:30"),mk("8-4"),mk("2-8"),mk("12-8"),mk("8-4"),mk("","OFF"),mkCl()]},{id:"c3",name:"Ernie",shifts:[mk("12-8"),mk("2-8"),mk("8-4"),mk("7:30-2:30"),mk("2-8"),mk("","OFF"),mkCl()]},{id:"c4",name:"Jess",shifts:[mk("2-8"),mk("12-8"),mk("7:30-2:30"),mk("","OFF"),mk("","VAC"),mk("8:30-4:30"),mkCl()]},{id:"c5",name:"Estel",shifts:[mk(""),mk(""),mk(""),mk(""),mk("12-8"),mk("","OFF"),mkCl()]}]
+  }},
+  {id:"w2",label:"Apr 27 – May 3",dates:["27-Apr","28-Apr","29-Apr","30-Apr","1-May","2-May","3-May"],approved:true,groups:{
+    Tech:[{id:"tb1",name:"Sally",shifts:[mk("12-7"),mk("","VAC"),mk("7:30-2:30"),mk("","VAC"),mk("12-8"),mk("","OFF"),mkCl()]},{id:"tb2",name:"Kira",shifts:[mk("2-8"),mk("12-7"),mk("8-4"),mk("7:30-2:30"),mk("8-4"),mk("","OFF"),mkCl()]},{id:"tb3",name:"Tanya",shifts:[mk("7:30-2:30"),mk("8-4"),mk("2-8"),mk("12-7"),mk("7:30-2:30"),mk("","OFF"),mkCl()]},{id:"tb4",name:"Katy",shifts:[mk("8-4"),mk("7:30-2:30"),mk("12-7"),mk("2-8"),mk("","OFF"),mk("8:30-4:30"),mkCl()]},{id:"tb5",name:"Danielle",shifts:[mk("8-2"),mk("2-8"),mk("","OFF"),mk("8-2"),mk("1-7"),mk("","OFF"),mkCl()]}],
+    VA:[{id:"vb1",name:"Catherine",shifts:[mk("2-8"),mk("1-7"),mk("8-4"),mk("","OFF"),mk("8-4"),mk("8:30-4:30"),mkCl()]},{id:"vb2",name:"Felicity",shifts:[mk("8-4"),mk("2-8"),mk("12-7"),mk("7:30-2:30"),mk("7:30-2:30"),mk("","OFF"),mkCl()]},{id:"vb3",name:"Greta",shifts:[mk("8-4"),mk("7:30-2:30"),mk("7:30-2:30"),mk("12-8"),mk("2-8"),mk("","VAC"),mkCl()]},{id:"vb4",name:"Belle",shifts:[mk("7:30-2:30"),mk("8-4"),mk("2-8"),mk("12-8"),mk("12-8"),mk("","OFF"),mkCl()]}],
+    CCR:[{id:"cb1",name:"Kath",shifts:[mk("8-4"),mk("7:30-2:30"),mk("12-8"),mk("","OFF"),mk("2-8"),mk("8:30-4:30"),mkCl()]},{id:"cb2",name:"Hanna",shifts:[mk("2-8"),mk("12-8"),mk("7:30-2:30"),mk("12-8"),mk("8-4"),mk("","OFF"),mkCl()]},{id:"cb3",name:"Ernie",shifts:[mk("12-8"),mk("2-8"),mk("8-4"),mk("7:30-2:30"),mk("7:30-2:30"),mk("","OFF"),mkCl()]},{id:"cb4",name:"Jess",shifts:[mk("7:30-2:30"),mk("8-4"),mk("2-8"),mk("8-4"),mk("12-8"),mk("","OFF"),mkCl()]},{id:"cb5",name:"Estel",shifts:[mk(""),mk(""),mk(""),mk(""),mk(""),mk("8:30-4:30"),mkCl()]}]
+  }},
+];
+const initStaff=()=>{const s=new Map();IW.forEach(w=>GROUPS.forEach(g=>(w.groups[g]||[]).forEach(e=>{if(!s.has(e.name))s.set(e.name,{name:e.name,group:g,pin:""});})));return[...s.values()];};
+
+/* ══ PIN PAD ════════════════════════════════════════════════════════ */
+function PinPad({validPins,onMatch,onCancel,title,subtitle,dark=false}){
+  const[input,setInput]=useState("");const[err,setErr]=useState(false);
+  const press=useCallback(n=>{
+    setInput(prev=>{
+      if(prev.length>=4)return prev;
+      const nv=prev+n;
+      if(nv.length>=3){const m=validPins.find(p=>p===nv);if(m){const hasLonger=validPins.some(p=>p!==nv&&p.startsWith(nv));if(!hasLonger){setTimeout(()=>onMatch(nv),0);}}}
+      return nv;
+    });setErr(false);
+  },[validPins,onMatch]);
+  const backspace=()=>{setInput(i=>i.slice(0,-1));setErr(false);};
+  const confirm=()=>{if(validPins.includes(input))onMatch(input);else{setErr(true);setTimeout(()=>{setErr(false);setInput("");},1200);}};
+  useEffect(()=>{
+    const h=e=>{
+      const numByCode=e.code?.startsWith("Numpad")&&"0123456789".includes(e.code.slice(6))?e.code.slice(6):null;
+      const digit="0123456789".includes(e.key)?e.key:numByCode;
+      if(digit)press(digit);else if(e.key==="Backspace")backspace();else if(e.key==="Enter")confirm();
+    };
+    window.addEventListener("keydown",h);return()=>window.removeEventListener("keydown",h);
+  },[press]);
+  const bg=dark?"#1e293b":"#fff";const bd=dark?"#334155":"#e2e8f0";const btnBg=dark?"#0f172a":"#f8fafc";const btnHov=dark?"#1e3a8a":"#eff6ff";const txtC=dark?"#f8fafc":"#1e293b";
+  return(
+    <div style={{background:bg,borderRadius:16,padding:24,width:280,boxShadow:"0 24px 64px rgba(0,0,0,0.3)"}}>
+      {title&&<div style={{fontWeight:700,fontSize:13,color:txtC,marginBottom:4}}>{title}</div>}
+      {subtitle&&<div style={{fontSize:9,color:"#64748b",marginBottom:14}}>{subtitle}</div>}
+      <div style={{display:"flex",gap:8,justifyContent:"center",marginBottom:16}}>
+        {[0,1,2,3].map(i=><div key={i} style={{width:48,height:56,border:`2px solid ${err?"#ef4444":input.length>i?"#3b82f6":bd}`,borderRadius:10,display:"flex",alignItems:"center",justifyContent:"center",fontSize:24,color:txtC,background:input.length>i?"#1d4ed8":dark?"#0f172a":"#f8fafc",transition:"all 0.15s"}}>{input.length>i?"●":""}</div>)}
+      </div>
+      {err&&<div style={{textAlign:"center",fontSize:9,color:"#ef4444",fontWeight:700,marginBottom:10}}>Incorrect PIN</div>}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:8}}>
+        {[1,2,3,4,5,6,7,8,9].map(n=><button key={n} onClick={()=>press(String(n))} style={{padding:"14px",borderRadius:10,border:`1px solid ${bd}`,background:btnBg,fontSize:18,fontWeight:600,cursor:"pointer",color:txtC}} onMouseEnter={e=>e.currentTarget.style.background=btnHov} onMouseLeave={e=>e.currentTarget.style.background=btnBg}>{n}</button>)}
+        <button onClick={backspace} style={{padding:"14px",borderRadius:10,border:`1px solid ${bd}`,background:"#7f1d1d",fontSize:16,cursor:"pointer",color:"#fca5a5"}} onMouseEnter={e=>e.currentTarget.style.background="#991b1b"} onMouseLeave={e=>e.currentTarget.style.background="#7f1d1d"}>⌫</button>
+        <button onClick={()=>press("0")} style={{padding:"14px",borderRadius:10,border:`1px solid ${bd}`,background:btnBg,fontSize:18,fontWeight:600,cursor:"pointer",color:txtC}} onMouseEnter={e=>e.currentTarget.style.background=btnHov} onMouseLeave={e=>e.currentTarget.style.background=btnBg}>0</button>
+        <button onClick={confirm} style={{padding:"14px",borderRadius:10,border:"none",background:"#1d4ed8",fontSize:16,cursor:"pointer",color:"#fff",fontWeight:700}} onMouseEnter={e=>e.currentTarget.style.background="#2563eb"} onMouseLeave={e=>e.currentTarget.style.background="#1d4ed8"}>✓</button>
+      </div>
+      {onCancel&&<button onClick={onCancel} style={{width:"100%",padding:"8px",borderRadius:8,border:`1px solid ${bd}`,background:"none",color:"#475569",fontSize:9,cursor:"pointer",marginTop:4}}>Cancel</button>}
+    </div>
+  );
+}
+
+/* ══ GOOGLE SIGN-IN LANDING ══════════════════════════════════════════
+ * Auth flow:
+ *   Step 1 — Button opens Google OAuth popup → returns id_token in hash
+ *   Step 2 — gasValidateEmail confirms email is on allowlist
+ *   Step 3 — PIN pad confirms role (staff / admin / viewer)
+ *
+ * Uses plain OAuth redirect (no GIS library) — works in GAS iframes.
+ * =================================================================== */
+function LandingLock({ onSignedIn }) {
+  const [step, setStep]           = useState("google");
+  const [token, setToken]         = useState(null);
+  const [emailName, setEmailName] = useState("");
+  const [validPins, setValidPins] = useState([]);
+  const [error, setError]         = useState("");
+  const [checking, setChecking]   = useState(false);
+
+  // Listen for the token coming back from the OAuth popup
+  useEffect(() => {
+    function onMessage(event) {
+      if (event.data && event.data.type === "GOOGLE_ID_TOKEN") {
+        handleCredential(event.data.token);
+      }
+    }
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, []);
+
+  // Also check if we landed here with a token in the hash (redirect flow)
+  useEffect(() => {
+    const hash = window.location.hash;
+    if (hash && hash.includes("id_token=")) {
+      const params = new URLSearchParams(hash.slice(1));
+      const idToken = params.get("id_token");
+      if (idToken) handleCredential(idToken);
+    }
+  }, []);
+
+  function triggerSignIn() {
+    setError("");
+    const nonce = Math.random().toString(36).slice(2);
+    const redirectUri = window.location.href.split("#")[0].split("?")[0];
+    const authUrl =
+      "https://accounts.google.com/o/oauth2/v2/auth" +
+      "?client_id=" + encodeURIComponent(GOOGLE_CLIENT_ID) +
+      "&redirect_uri=" + encodeURIComponent(redirectUri) +
+      "&response_type=id_token" +
+      "&scope=" + encodeURIComponent("openid email profile") +
+      "&nonce=" + nonce +
+      "&prompt=select_account";
+
+    const popup = window.open(authUrl, "hpvh_google_signin",
+      "width=520,height=620,top=" + Math.round((screen.height-620)/2) +
+      ",left=" + Math.round((screen.width-520)/2));
+
+    if (!popup) {
+      setError("Popup was blocked. Please allow popups for this site and try again.");
+      return;
+    }
+
+    // Poll the popup for the id_token in its URL hash
+    const timer = setInterval(() => {
+      try {
+        if (!popup || popup.closed) { clearInterval(timer); return; }
+        const hash = popup.location.hash;
+        if (hash && hash.includes("id_token=")) {
+          clearInterval(timer);
+          const params = new URLSearchParams(hash.slice(1));
+          const idToken = params.get("id_token");
+          popup.close();
+          if (idToken) handleCredential(idToken);
+        }
+      } catch(e) {
+        // Cross-origin while Google is loading — expected, keep polling
+      }
+    }, 300);
+  }
+
+  async function handleCredential(idToken) {
+    setError(""); setChecking(true);
+    try {
+      const result = await gasValidateEmail(idToken);
+      setToken(idToken);
+      setEmailName(result.email || "");
+      const sched = await gasGetSchedule(idToken);
+      const sp = sched.data.staffPins || [];
+      const settings = sched.data.settings || {};
+      const pins = sp.filter(s=>s.pin&&s.pin.length>=3).map(s=>s.pin);
+      if (settings.adminPin1&&String(settings.adminPin1).length>=3) pins.push(String(settings.adminPin1));
+      if (settings.adminPin2&&String(settings.adminPin2).length>=3) pins.push(String(settings.adminPin2));
+      setValidPins(pins);
+      onSignedIn._schedData = sched.data;
+      onSignedIn._token = idToken;
+      setStep("pin");
+    } catch(err) {
+      setError(err.message || "Could not verify your account. Try again.");
+    } finally { setChecking(false); }
+  }
+
+  async function handlePinMatch(pin) {
+    setError(""); setChecking(true);
+    try {
+      const result = await gasValidatePin(token, pin);
+      onSignedIn({ token, role:result.role, name:result.name, group:result.group, schedData:onSignedIn._schedData });
+    } catch(err) {
+      setError("Incorrect PIN. Try again.");
+    } finally { setChecking(false); }
+  }
+
+  return(
+    <div style={{minHeight:"100vh",background:"#0f172a",display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column"}}>
+      <div style={{width:32,height:32,borderRadius:8,background:"linear-gradient(135deg,#3b82f6,#06b6d4)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,marginBottom:16}}>🐾</div>
+      <div style={{fontWeight:800,fontSize:18,color:"#f8fafc",marginBottom:4}}>HPVH Schedule</div>
+      <div style={{fontSize:10,color:"#475569",marginBottom:28}}>Hammonds Plains Veterinary Hospital</div>
+      {step==="google"&&(
+        <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:16}}>
+          <div style={{fontSize:11,color:"#64748b",marginBottom:4}}>Sign in with your Google account to continue</div>
+          <button
+            onClick={triggerSignIn}
+            style={{display:"flex",alignItems:"center",gap:12,padding:"12px 24px",borderRadius:8,border:"1px solid #dadce0",background:"#fff",cursor:"pointer",fontSize:14,fontWeight:500,color:"#3c4043",boxShadow:"0 1px 3px rgba(0,0,0,0.2)"}}>
+            <svg width="18" height="18" viewBox="0 0 18 18">
+              <path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.875 2.684-6.615z"/>
+              <path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332C2.438 15.983 5.482 18 9 18z"/>
+              <path fill="#FBBC05" d="M3.964 10.71c-.18-.54-.282-1.117-.282-1.71s.102-1.17.282-1.71V4.958H.957C.347 6.173 0 7.548 0 9s.348 2.827.957 4.042l3.007-2.332z"/>
+              <path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0 5.482 0 2.438 2.017.957 4.958L3.964 7.29C4.672 5.163 6.656 3.58 9 3.58z"/>
+            </svg>
+            Sign in with Google
+          </button>
+          {checking&&<div style={{fontSize:10,color:"#60a5fa",marginTop:4}}>Verifying…</div>}
+          {error&&<div style={{fontSize:10,color:"#f87171",marginTop:4,maxWidth:280,textAlign:"center"}}>{error}</div>}
+        </div>
+      )}
+      {step==="pin"&&(
+        <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
+          <div style={{fontSize:10,color:"#60a5fa",marginBottom:12,background:"#1e3a5f",padding:"4px 14px",borderRadius:20,fontWeight:600}}>✓ {emailName}</div>
+          <div style={{fontSize:11,color:"#94a3b8",marginBottom:16}}>Enter your PIN</div>
+          {validPins.length>0
+            ?<PinPad dark validPins={validPins} onMatch={handlePinMatch} onCancel={null}/>
+            :<div style={{fontSize:10,color:"#f87171",maxWidth:260,textAlign:"center"}}>No PINs set up yet. Ask an admin to add PINs in the Sheet → StaffPins tab.</div>}
+          {checking&&<div style={{fontSize:10,color:"#60a5fa",marginTop:8}}>Checking…</div>}
+          {error&&<div style={{fontSize:10,color:"#f87171",marginTop:4}}>{error}</div>}
+          <button onClick={()=>{setStep("google");setError("");}} style={{marginTop:12,padding:"6px 14px",borderRadius:8,border:"1px solid #334155",background:"none",color:"#475569",fontSize:9,cursor:"pointer"}}>← Use a different account</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ══ SMALL COMPONENTS ════════════════════════════════════════════════ */
+function Btn({onClick,children,style={},variant="default",disabled=false}){
+  const V={default:{background:"#f8fafc",border:"1px solid #e2e8f0",color:"#475569"},primary:{background:"#3b82f6",border:"none",color:"#fff"},danger:{background:"#fee2e2",border:"1px solid #f87171",color:"#991b1b"},success:{background:"#dcfce7",border:"1px solid #86efac",color:"#15803d"},warn:{background:"#fef3c7",border:"1px solid #f59e0b",color:"#92400e"}};
+  return <button onClick={onClick} disabled={disabled} onMouseEnter={e=>{if(!disabled)e.currentTarget.style.opacity="0.8";}} onMouseLeave={e=>e.currentTarget.style.opacity="1"} style={{padding:"5px 12px",borderRadius:6,fontSize:9,cursor:disabled?"not-allowed":"pointer",fontWeight:600,transition:"opacity 0.15s",opacity:disabled?0.4:1,...V[variant],...style}}>{children}</button>;
+}
+function CustomInput({onApply}){
+  const[open,setO]=useState(false),[val,setV]=useState("");
+  if(!open)return <Btn onClick={()=>setO(true)} style={{width:"100%",textAlign:"left"}}>✎ Custom time</Btn>;
+  return <div style={{display:"flex",gap:3,marginTop:2}}><input autoFocus value={val} onChange={e=>setV(e.target.value)} placeholder="e.g. 9-4" onKeyDown={e=>{if(e.key==="Enter"&&val.trim()){onApply(val.trim());setO(false);setV("");}if(e.key==="Escape"){setO(false);setV("");}}} style={{flex:1,background:"#f0f4f8",border:"1px solid #93c5fd",borderRadius:4,color:"#1e293b",fontSize:10,padding:"4px 6px",outline:"none"}}/><Btn onClick={()=>{if(val.trim()){onApply(val.trim());setO(false);setV("");}}} variant="primary">✓</Btn></div>;
+}
+function HrsCell({h,isAdmin,onChange}){
+  const[ed,setEd]=useState(false),[val,setV]=useState(String(h));
+  useEffect(()=>{if(!ed)setV(String(h));},[h,ed]);
+  if(ed)return <input autoFocus type="number" value={val} onChange={e=>setV(e.target.value)} onBlur={()=>{onChange(parseFloat(val)||0);setEd(false);}} onKeyDown={e=>{if(e.key==="Enter"){onChange(parseFloat(val)||0);setEd(false);}if(e.key==="Escape")setEd(false);}} onClick={e=>e.stopPropagation()} style={{width:30,background:"#f0f9ff",border:"1px solid #3b82f6",borderRadius:3,color:"#1e40af",fontSize:9,padding:"1px 3px",outline:"none"}}/>;
+  return <div onClick={e=>{if(isAdmin){e.stopPropagation();setEd(true);}}} style={{fontSize:10,color:"#64748b",cursor:isAdmin?"text":"default"}} onMouseEnter={e=>{if(isAdmin)e.currentTarget.style.color="#3b82f6";}} onMouseLeave={e=>{e.currentTarget.style.color="#64748b";}}>{h>0?`${h}h`:""}</div>;
+}
+
+/* ══ LONG PRESS HOOK ════════════════════════════════════════════════ */
+function useLongPress(onLongPress,onTap,ms=600){
+  const timer=useRef(null);const fired=useRef(false);const ctxFired=useRef(false);
+  const start=useCallback(e=>{ctxFired.current=false;fired.current=false;timer.current=setTimeout(()=>{fired.current=true;onLongPress(e);},ms);},[onLongPress,ms]);
+  const cancel=useCallback(()=>clearTimeout(timer.current),[]);
+  const end=useCallback(e=>{clearTimeout(timer.current);if(!fired.current&&!ctxFired.current&&onTap)onTap(e);},[onTap]);
+  const markCtx=useCallback(()=>{ctxFired.current=true;clearTimeout(timer.current);},[]);
+  return{onMouseDown:start,onMouseUp:end,onMouseLeave:cancel,onTouchStart:e=>{e.preventDefault();start(e.touches[0]);},onTouchEnd:e=>{e.preventDefault();end(e.changedTouches[0]);},onTouchCancel:cancel,_markCtx:markCtx};
+}
+
+/* ══ ADMIN CONFIRM MODAL ────────────────────────────────────────── */
+function AdminConfirmModal({prompt,pwd,pwd2,onConfirm,onClose}){
+  const[input,setInput]=useState("");const[err,setErr]=useState(false);
+  const submit=()=>{if(input===pwd||input===pwd2){onConfirm();onClose();}else setErr(true);};
+  return(
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:9995}}>
+      <div data-ov style={{background:"#fff",borderRadius:14,padding:24,width:290,boxShadow:"0 24px 64px rgba(0,0,0,0.2)"}}>
+        <div style={{fontSize:13,fontWeight:800,color:"#1e293b",marginBottom:4}}>🔐 Admin Required</div>
+        <div style={{fontSize:10,color:"#64748b",marginBottom:14}}>{prompt}</div>
+        <input autoFocus type="password" value={input} onChange={e=>{setInput(e.target.value);setErr(false);}} onKeyDown={e=>e.key==="Enter"&&submit()} placeholder="Admin password" style={{width:"100%",background:"#f8fafc",border:`1px solid ${err?"#ef4444":"#e2e8f0"}`,borderRadius:8,padding:"9px 12px",color:"#1e293b",fontSize:12,outline:"none",boxSizing:"border-box",marginBottom:6}}/>
+        {err&&<div style={{fontSize:9,color:"#ef4444",marginBottom:8}}>Incorrect password</div>}
+        <div style={{display:"flex",gap:8,marginTop:8}}><Btn onClick={submit} variant="primary" style={{flex:1,padding:"9px",fontSize:11}}>CONFIRM</Btn><Btn onClick={onClose} style={{padding:"9px 14px",fontSize:11}}>Cancel</Btn></div>
+      </div>
+    </div>
+  );
+}
+
+/* ══ STAFF PIN MODAL ────────────────────────────────────────────── */
+function StaffPinModal({empName,group,staffPins,onUnlock,onClose}){
+  const pin=(staffPins.find(s=>s.name===empName&&s.group===group)||{}).pin||"";
+  const hasPin=pin.length>=3;const gc=DEF[group]||DEF.Tech;
+  return(
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:9990}}>
+      <div data-ov style={{background:"#fff",borderRadius:12,padding:24,width:290,boxShadow:"0 16px 48px rgba(0,0,0,0.18)"}}>
+        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}>
+          <div style={{width:8,height:8,borderRadius:"50%",background:gc.acc}}/><div style={{fontWeight:700,fontSize:13,color:"#1e293b"}}>{empName}</div>
+          <span style={{fontSize:9,padding:"2px 7px",borderRadius:20,background:gc.cbg,border:`1px solid ${gc.cbo}`,color:gc.htx,fontWeight:700}}>{group}</span>
+        </div>
+        {!hasPin?<div style={{fontSize:10,color:"#94a3b8",marginBottom:12,textAlign:"center"}}>No PIN set. Ask an admin to set one.</div>
+          :<PinPad validPins={[pin]} onMatch={()=>{onUnlock();onClose();}} onCancel={onClose} subtitle="Enter your PIN"/>}
+        {!hasPin&&<Btn onClick={onClose} style={{width:"100%",marginTop:8,fontSize:9,color:"#94a3b8"}}>Close</Btn>}
+      </div>
+    </div>
+  );
+}
+
+/* ══ SHIFT CELL ─────────────────────────────────────────────────── */
+function ShiftCell({s,group,isAdmin,canSwap,tdStyle,C,onTap,onLong,onCtxMenu,onHrs,onSickHrs,onApprove,onDeny,onSwapRequest,onApproveSwap,onDenySwap,customDayLabels}){
+  const sc=getC(s,group,C);const isPending=s?.reqSt==="PENDING";
+  const customLabel=s?.customLabel||(customDayLabels?.[0]||"Custom");
+  const lp=useLongPress(
+    e=>{if(isAdmin&&onLong)onLong(e.clientX||e.pageX||0,e.clientY||e.pageY||0);},
+    e=>{if(isAdmin&&onTap)onTap(e.currentTarget?.getBoundingClientRect?.()||{top:0,bottom:0,left:0});else if(!isAdmin&&canSwap&&onSwapRequest)onSwapRequest();},600
+  );
+  const handleCtxMenu=useCallback(e=>{e.preventDefault();e.stopPropagation();if(isAdmin&&onCtxMenu){if(lp._markCtx)lp._markCtx();onCtxMenu(e.clientX,e.clientY);}},[isAdmin,onCtxMenu,lp]);
+  const customC=C.CUSTOM||DEF.CUSTOM;
+  return(
+    <td style={{padding:"3px 2px",...(tdStyle||{})}}>
+      <div {...lp} onContextMenu={handleCtxMenu}
+        style={{background:sc.bg,border:`${isPending?"2px dashed":"1px solid"} ${sc.bo}`,borderRadius:6,padding:"5px 7px",minHeight:52,cursor:(isAdmin||canSwap)?"pointer":"default",display:"flex",flexDirection:"column",userSelect:"none",WebkitUserSelect:"none",position:"relative"}}
+        onMouseEnter={e=>{if(isAdmin||canSwap)e.currentTarget.style.borderColor="#3b82f6";}} onMouseLeave={e=>{e.currentTarget.style.borderColor=sc.bo;}}>
+        {s?.tg?.length>0&&<div style={{display:"flex",gap:2,marginBottom:2,flexWrap:"wrap"}}>{s.tg.map(t=>{const tc=TAG_CFG[t]||{};return <span key={t} style={{fontSize:7,padding:"1px 4px",borderRadius:3,fontWeight:700,background:tc.bg||"#f1f5f9",color:tc.c||"#475569"}}>{tc.lbl||t}</span>;})}</div>}
+        {s?.swapPending&&!s?.swapped&&<div style={{fontSize:7,color:"#7c3aed",fontWeight:700}}>🔄 SWAP PENDING</div>}
+        {s?.swapPending&&!s?.swapped&&isAdmin&&onApproveSwap&&<div style={{display:"flex",gap:3,marginTop:2}} onClick={e=>e.stopPropagation()}><Btn onClick={onApproveSwap} variant="success" style={{flex:1,padding:"2px",fontSize:7}}>✓</Btn><Btn onClick={onDenySwap} variant="danger" style={{flex:1,padding:"2px",fontSize:7}}>✕</Btn></div>}
+        {isPending&&<div style={{fontSize:7,color:"#92400e",fontWeight:700}}>⏳ PENDING</div>}
+        {s?.st==="VAC"&&<div style={{fontSize:12,fontWeight:700,color:sc.tx}}>🌴 VAC</div>}
+        {s?.st==="OFF"&&<div style={{fontSize:11,color:sc.tx}}>OFF</div>}
+        {s?.st==="CLOSED"&&<div style={{fontSize:10,color:sc.tx,fontWeight:600}}>CLOSED</div>}
+        {s?.st==="CUSTOM"&&<div style={{fontSize:10,fontWeight:700,color:customC.tx}}>⭐ {customLabel}</div>}
+        {s?.st==="SICK"&&<div>
+          <div style={{fontSize:11,color:"#94a3b8",textDecoration:"line-through"}}>{s.t||"—"}</div>
+          <div style={{fontSize:9,color:sc.tx,fontWeight:700}}>🤒 SICK</div>
+          <div style={{display:"flex",alignItems:"center",gap:3,marginTop:2}} onClick={e=>e.stopPropagation()}>
+            {isAdmin?<input type="number" min="0" max="12" step="0.5" value={s.sh!==null?s.sh:""} onChange={e=>onSickHrs&&onSickHrs(e.target.value===""?null:+e.target.value)} placeholder="0" style={{width:30,background:"#fff",border:"1px solid #f87171",borderRadius:3,color:"#991b1b",fontSize:9,padding:"1px 4px",outline:"none",textAlign:"center"}}/>
+            :<span style={{fontSize:9,color:"#991b1b"}}>{s.sh!==null?`${s.sh}h`:"0h"}</span>}
+            <span style={{fontSize:8,color:"#94a3b8"}}>hrs</span>
+          </div>
+        </div>}
+        {!s?.st&&s?.t&&<div><div style={{fontSize:12,fontWeight:700,color:sc.tx}}>{s.t}</div><HrsCell h={s.h} isAdmin={isAdmin} onChange={v=>onHrs&&onHrs(v)}/></div>}
+        {!s?.st&&!s?.t&&isAdmin&&<div style={{fontSize:9,color:"#cbd5e1",textAlign:"center",marginTop:8}}>+ add</div>}
+        {!isAdmin&&canSwap&&s?.t&&!s?.st&&<div style={{fontSize:7,color:"#7c3aed",marginTop:4,textAlign:"center"}}>tap to swap</div>}
+        {isPending&&isAdmin&&<div style={{display:"flex",gap:3,marginTop:2}} onClick={e=>e.stopPropagation()}><Btn onClick={onApprove} variant="success" style={{flex:1,padding:"2px",fontSize:8}}>✓</Btn><Btn onClick={onDeny} variant="danger" style={{flex:1,padding:"2px",fontSize:8}}>✕</Btn></div>}
+        {s?.swapped&&<div style={{position:"absolute",bottom:3,right:4,fontSize:7,color:sc.tx,fontWeight:700,opacity:0.8}}>↔ swapped</div>}
+      </div>
+    </td>
+  );
+}
+
+/* ══ DUAL SCROLL ─────────────────────────────────────────────────── */
+function DualScroll({children,showTop=false,scrollRef=null}){
+  const topR=useRef(null);const botR=useRef(null);const sync=useRef(false);const[tw,setTw]=useState(3000);
+  useEffect(()=>{const ob=new ResizeObserver(()=>{if(botR.current)setTw(botR.current.scrollWidth);});if(botR.current)ob.observe(botR.current);return()=>ob.disconnect();},[]);
+  useEffect(()=>{if(scrollRef)scrollRef.current=botR.current;},[scrollRef]);
+  const onTop=()=>{if(sync.current)return;sync.current=true;if(botR.current)botR.current.scrollLeft=topR.current.scrollLeft;sync.current=false;};
+  const onBot=()=>{if(sync.current)return;sync.current=true;if(topR.current)topR.current.scrollLeft=botR.current.scrollLeft;sync.current=false;};
+  return <div>{showTop&&<div ref={topR} onScroll={onTop} style={{overflowX:"auto",overflowY:"hidden",height:8,marginBottom:2}}><div style={{width:tw,height:1}}/></div>}<div ref={botR} onScroll={onBot} style={{overflowX:"auto"}}>{children}</div></div>;
+}
+
+/* ══ SWAP REQUEST MODAL ─────────────────────────────────────────── */
+function SwapRequestModal({requesterName,requesterGroup,requesterShift,requesterDate,weekId,shiftIdx,liveWeeks,staffPins,onSubmit,onClose,addAudit}){
+  const[targetName,setTargetName]=useState("");const[targetGroup,setTargetGroup]=useState("");const[note,setNote]=useState("");
+  const week=liveWeeks.find(w=>w.id===weekId);
+  const targets=useMemo(()=>{
+    if(!week)return[];const out=[];
+    GROUPS.forEach(g=>(week.groups[g]||[]).forEach(e=>{
+      if(e.name===requesterName&&g===requesterGroup)return;
+      const hasPIN=staffPins.some(p=>p.name===e.name&&p.group===g&&p.pin&&p.pin.length>=3);if(!hasPIN)return;
+      const s=e.shifts[shiftIdx];
+      if(!s||["VAC","OFF","CLOSED","CUSTOM"].includes(s.st)||(!s.t&&!s.st))return;
+      out.push({name:e.name,group:g,shift:s});
+    }));return out;
+  },[week,staffPins,requesterName,requesterGroup,shiftIdx]);
+  const submit=()=>{
+    if(!targetName)return;
+    const tgt=targets.find(t=>t.name===targetName&&t.group===targetGroup);
+    onSubmit({requesterName,requesterGroup,requesterShift,targetName,targetGroup,targetShift:tgt?.shift,date:requesterDate,weekId,shiftIdx,note,ts:nowTs()});
+    onClose();
+  };
+  return(
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:9992}}>
+      <div data-ov style={{background:"#fff",borderRadius:14,padding:24,width:340,boxShadow:"0 24px 64px rgba(0,0,0,0.2)"}}>
+        <div style={{fontWeight:800,fontSize:13,color:"#1e293b",marginBottom:4}}>🔄 Request Shift Swap</div>
+        <div style={{fontSize:9,color:"#64748b",marginBottom:14}}><strong>{requesterName}</strong> · {requesterDate} · <span style={{background:"#ede9fe",color:"#4c1d95",padding:"1px 6px",borderRadius:4,fontSize:9}}>{requesterShift?.t||"—"}</span></div>
+        <div style={{fontSize:10,fontWeight:600,color:"#475569",marginBottom:8}}>Select who to swap with:</div>
+        {targets.length===0
+          ?<div style={{fontSize:9,color:"#94a3b8",padding:"12px",background:"#f8fafc",borderRadius:7,marginBottom:12}}>No eligible staff with PINs are working this shift.</div>
+          :<div style={{display:"flex",flexDirection:"column",gap:4,marginBottom:12,maxHeight:200,overflowY:"auto"}}>
+            {targets.map(t=>{const gc=DEF[t.group]||DEF.Tech;return(
+              <button key={t.name+t.group} onClick={()=>{setTargetName(t.name);setTargetGroup(t.group);}}
+                style={{display:"flex",alignItems:"center",gap:8,padding:"8px 10px",borderRadius:7,border:`1px solid ${targetName===t.name&&targetGroup===t.group?"#7c3aed":"#e2e8f0"}`,background:targetName===t.name&&targetGroup===t.group?"#ede9fe":"#f8fafc",cursor:"pointer",textAlign:"left"}}>
+                <div style={{width:6,height:6,borderRadius:"50%",background:gc.acc,flexShrink:0}}/>
+                <span style={{fontWeight:600,fontSize:11,color:"#1e293b"}}>{t.name}</span>
+                <span style={{fontSize:9,padding:"1px 6px",borderRadius:10,background:gc.cbg,border:`1px solid ${gc.cbo}`,color:gc.htx,fontWeight:700}}>{t.group}</span>
+                <span style={{fontSize:9,color:"#64748b",marginLeft:"auto"}}>{t.shift?.t||"—"}</span>
+              </button>
+            );})}
+          </div>}
+        <textarea value={note} onChange={e=>setNote(e.target.value)} placeholder="Optional note..." rows={2} style={{width:"100%",background:"#f8fafc",border:"1px solid #e2e8f0",borderRadius:7,padding:"7px 10px",color:"#1e293b",fontSize:10,outline:"none",resize:"none",boxSizing:"border-box",marginBottom:12}}/>
+        <div style={{display:"flex",gap:8}}>
+          <Btn onClick={submit} variant="primary" style={{flex:1,fontSize:11}} disabled={!targetName}>📤 Submit Request</Btn>
+          <Btn onClick={onClose} style={{padding:"8px 14px",fontSize:11}}>Cancel</Btn>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ══ SCHEDULE GRID ───────────────────────────────────────────────── */
+function HorizSchedule({weeks,isAdmin,readonly,C,staffPins,staffUnlocked,swapRequesterInfo,swapRequests,onTap,onLong,onCtxMenu,onHrs,onSickHrs,onArchive,onApprove,onDeny,onSwapRequest,onApproveSwap,onDenySwap,customDayLabels}){
+  if(!weeks.length)return <div style={{textAlign:"center",padding:60,color:"#94a3b8",fontSize:11}}>No published weeks.</div>;
+  const allNames={};GROUPS.forEach(g=>{allNames[g]=[];const seen=new Set();weeks.forEach(w=>(w.groups[g]||[]).forEach(e=>{if(!seen.has(e.name)){seen.add(e.name);allNames[g].push(e.name);}}));});
+  const total=1+weeks.length*8;
+  const hasSwapAuth=!!swapRequesterInfo;
+  const getPendingSwap=(name,grp,weekId,si)=>swapRequests?.find(sr=>sr.status==="PENDING"&&sr.weekId===weekId&&sr.shiftIdx===si&&((sr.requesterName===name&&sr.requesterGroup===grp)||(sr.targetName===name&&sr.targetGroup===grp)))||null;
+  return(
+    <DualScroll showTop={true}>
+      <table style={{borderCollapse:"separate",borderSpacing:0,minWidth:"max-content",background:"#fff",borderRadius:8,overflow:"hidden",boxShadow:"0 1px 4px rgba(0,0,0,0.08)"}}>
+        <thead><tr style={{background:"#f8fafc"}}>
+          <th style={{position:"sticky",left:0,zIndex:11,background:"#f8fafc",minWidth:118,padding:"6px 10px",borderBottom:"2px solid #e2e8f0",borderRight:"2px solid #e2e8f0",fontSize:9,color:"#64748b",textAlign:"left",fontWeight:700}}>STAFF</th>
+          {weeks.map((w,wi)=><th key={w.id} colSpan={8} style={{background:"#f8fafc",borderBottom:"2px solid #e2e8f0",borderLeft:wi>0?"2px solid #e2e8f0":"none",padding:"6px 10px",fontWeight:700,fontSize:13,color:"#1e293b",textAlign:"left",whiteSpace:"nowrap"}}>
+            <div style={{display:"flex",alignItems:"center",gap:7}}><span>{w.label}</span>{!readonly&&isAdmin&&onArchive&&<Btn onClick={()=>onArchive(w.id)} style={{fontSize:7,padding:"2px 6px"}}>📦 archive</Btn>}</div>
+          </th>)}
+        </tr></thead>
+        <tbody>{GROUPS.flatMap(grp=>{
+          const gc=C[grp]||DEF[grp];const names=allNames[grp];
+          return[
+            <tr key={`gh-${grp}`} style={{background:gc.gbg}}><td colSpan={total} style={{padding:"4px 12px",borderTop:"2px solid #e2e8f0"}}><span style={{fontWeight:800,fontSize:11,color:gc.htx,letterSpacing:"0.15em",textTransform:"uppercase"}}>{grp}</span><span style={{fontSize:8,color:gc.acc,marginLeft:8}}>{names.length} staff</span></td></tr>,
+            <tr key={`dh-${grp}`} style={{background:gc.gbg}}>
+              <td style={{position:"sticky",left:0,zIndex:6,background:gc.gbg,padding:"2px 10px",borderRight:"2px solid #e2e8f0",borderBottom:"1px solid #e2e8f0"}}/>
+              {weeks.flatMap((w,wi)=>[...DAYS.map((d,di)=><td key={`${w.id}-${grp}-${d}`} style={{textAlign:"center",padding:"3px 2px",fontSize:11,fontWeight:700,color:gc.htx,borderLeft:di===0&&wi>0?"2px solid #e2e8f0":"none",borderBottom:"1px solid #e2e8f0",minWidth:88,background:gc.gbg}}><div>{d}</div><div style={{fontSize:8,color:gc.acc,fontWeight:400}}>{w.dates?.[di]||""}</div></td>),<td key={`${w.id}-${grp}-h`} style={{textAlign:"center",padding:"2px 4px",fontSize:8,color:gc.acc,borderLeft:"1px solid #e2e8f0",borderBottom:"1px solid #e2e8f0",background:gc.gbg,fontWeight:600}}>HRS</td>])}
+            </tr>,
+            ...names.map((name,ni)=>(
+              <tr key={`${grp}-${name}`} style={{background:ni%2===0?"#fff":gc.gbg+"88"}}>
+                <td style={{position:"sticky",left:0,zIndex:5,background:ni%2===0?"#fff":gc.gbg+"cc",padding:"3px 10px",verticalAlign:"middle",borderRight:"2px solid #e2e8f0",whiteSpace:"nowrap"}}>
+                  <div style={{display:"flex",alignItems:"center",gap:5}}><div style={{width:6,height:6,borderRadius:"50%",background:gc.acc,flexShrink:0}}/><span style={{fontWeight:600,fontSize:11,color:"#1e293b"}}>{name}</span></div>
+                </td>
+                {weeks.flatMap((week,wi)=>{
+                  const ei=(week.groups[grp]||[]).findIndex(e=>e.name===name);const emp=ei>=0?week.groups[grp][ei]:null;
+                  const tot=emp?eTotal(emp):0;const tC=tot>=36?gc.acc:tot>=30?"#d97706":"#ef4444";
+                  const isRequesterRow=hasSwapAuth&&swapRequesterInfo.name===name&&swapRequesterInfo.group===grp;
+                  const cells=emp?emp.shifts.map((s,si)=>{
+                    const canSwap=isRequesterRow&&s?.t&&!s?.st;
+                    const pendingSwap=getPendingSwap(name,grp,week.id,si);
+                    const sDisplay=pendingSwap?{...s,swapPending:true}:s;
+                    return <ShiftCell key={`${week.id}-${si}`} s={sDisplay} group={grp} isAdmin={isAdmin} canSwap={canSwap} C={C} customDayLabels={customDayLabels}
+                      tdStyle={si===0&&wi>0?{borderLeft:"2px solid #e2e8f0"}:{}}
+                      onTap={rect=>onTap&&onTap(week.id,grp,ei,si,si,rect)}
+                      onLong={(x,y)=>onLong&&onLong(week.id,grp,ei,si,x,y)}
+                      onCtxMenu={(x,y)=>onCtxMenu&&onCtxMenu(week.id,grp,ei,si,x,y)}
+                      onHrs={h=>onHrs&&onHrs(week.id,grp,ei,si,h)}
+                      onSickHrs={sh=>onSickHrs&&onSickHrs(week.id,grp,ei,si,sh)}
+                      onApprove={()=>onApprove&&onApprove(week.id,grp,ei,si)}
+                      onDeny={()=>onDeny&&onDeny(week.id,grp,ei,si)}
+                      onApproveSwap={pendingSwap&&isAdmin?()=>onApproveSwap&&onApproveSwap(pendingSwap.id):null}
+                      onDenySwap={pendingSwap&&isAdmin?()=>onDenySwap&&onDenySwap(pendingSwap.id):null}
+                      onSwapRequest={canSwap?()=>onSwapRequest&&onSwapRequest(week.id,grp,ei,si,s,week.dates[si]):null}/>;
+                  }):Array(7).fill(0).map((_,si)=><td key={`${week.id}-e${si}`} style={{padding:"3px 2px",...(si===0&&wi>0?{borderLeft:"2px solid #e2e8f0"}:{})}}><div style={{background:EC.bg,border:`1px solid ${EC.bo}`,borderRadius:6,minHeight:52}}/></td>);
+                  return[...cells,<td key={`${week.id}-tot`} style={{padding:"3px 5px",verticalAlign:"middle",borderLeft:"1px solid #e2e8f0"}}>{emp&&<div style={{background:"#f8fafc",border:"1px solid #e2e8f0",borderRadius:5,padding:"4px",fontSize:12,fontWeight:700,color:tC,textAlign:"center",minWidth:36}}>{tot}</div>}</td>];
+                })}
+              </tr>
+            ))
+          ];
+        })}</tbody>
+      </table>
+    </DualScroll>
+  );
+}
+
+/* ══ TIME OFF CALENDAR ───────────────────────────────────────────── */
+function TOCalendar({calDates,lockedTOWeeks,liveDates,requests,setRequests,masterWeeks,setMasterWeeks,allEmps,isUnlocked,staffUnlocked,staffPins,onRequestStaffPin,onRequestWeekUnlock,C,availability,setAvailability}){
+  const[drag,setDrag]=useState(null);const[dragEnd,setDragEnd]=useState(null);
+  const[picker,setPicker]=useState(null);const[customTime,setCustomTime]=useState("");
+  const getDR=(s,e)=>{const si=calDates.indexOf(s);const ei=calDates.indexOf(e);if(si===-1||ei===-1)return[s];const[lo,hi]=si<=ei?[si,ei]:[ei,si];return calDates.slice(lo,hi+1);};
+  const dragDates=drag&&dragEnd?getDR(drag.start,dragEnd):[];
+  const isDateLocked=(dt,isAdm)=>{
+    if(isAdm)return false;if(liveDates.has(dt))return true;
+    const idx=calDates.indexOf(dt);if(idx===-1)return false;
+    const ws=calDates[Math.floor(idx/7)*7];const we=calDates[Math.floor(idx/7)*7+6];
+    return lockedTOWeeks.has(`${ws}|${we}`);
+  };
+  function submitReq(empName,group,type,dates,customT=""){
+    const id=uid();const on=todayStr();
+    const newReq={id,empName,group,type,dates,customTime:customT,status:"PENDING",requestedOn:on};
+    setRequests(prev=>[...prev,newReq]);
+    setMasterWeeks(prev=>{
+      const upd=[...prev];
+      dates.forEach(ds=>{
+        const wi=upd.findIndex(w=>w.dates.includes(ds));if(wi===-1)return;
+        const w={...upd[wi]};const g=[...(w.groups[group]||[])];const ei=g.findIndex(e=>e.name===empName);if(ei===-1)return;
+        const emp={...g[ei]};const shifts=[...emp.shifts];const di=w.dates.indexOf(ds);if(di===-1)return;
+        const patch=type==="VACATION"?{t:"",h:0,st:"VAC",tg:[],sh:null,rc:null,reqId:id,reqSt:"PENDING"}:{t:REQ_TYPES[type]?.t||customT||"",h:toH(REQ_TYPES[type]?.t||customT||""),st:null,tg:[],sh:null,rc:null,reqId:id,reqSt:"PENDING"};
+        shifts[di]={...shifts[di],...patch};emp.shifts=shifts;g[ei]=emp;w.groups={...w.groups,[group]:g};upd[wi]=w;
+      });return upd;
+    });
+    setPicker(null);setDrag(null);setDragEnd(null);setCustomTime("");
+  }
+  const approveReq=reqId=>{setRequests(prev=>prev.map(r=>r.id===reqId?{...r,status:"APPROVED"}:r));setMasterWeeks(prev=>prev.map(w=>({...w,groups:Object.fromEntries(Object.entries(w.groups).map(([g,emps])=>[g,emps.map(emp=>({...emp,shifts:emp.shifts.map(s=>s?.reqId===reqId?{...s,reqSt:"APPROVED"}:s)}))]))})));};
+  const denyReq=reqId=>{setRequests(prev=>prev.map(r=>r.id===reqId?{...r,status:"DENIED"}:r));setMasterWeeks(prev=>prev.map(w=>({...w,groups:Object.fromEntries(Object.entries(w.groups).map(([g,emps])=>[g,emps.map(emp=>({...emp,shifts:emp.shifts.map(s=>s?.reqId===reqId?{...s,t:"",h:0,st:null,reqSt:"DENIED",reqId:null}:s)}))]))})));};
+  const reqBg=(req,grp)=>{if(req.type==="VACATION")return req.status==="PENDING"?PEND_CLR.bg:"#fef3c7";const gc=C[grp]||DEF[grp];return gc.cbg;};
+  const reqBo=(req,grp)=>{if(req.type==="VACATION")return req.status==="PENDING"?PEND_CLR.bo:"#f59e0b";const gc=C[grp]||DEF[grp];return req.status==="PENDING"?gc.cbo:gc.acc;};
+  const reqTx=(req,grp)=>{if(req.type==="VACATION")return req.status==="PENDING"?PEND_CLR.tx:"#78350f";const gc=C[grp]||DEF[grp];return gc.ctx;};
+  const weekBlocks=[];
+  for(let i=0;i<calDates.length;i+=7){const block=calDates.slice(i,i+7);const key=`${block[0]}|${block[block.length-1]}`;const isLive=block.some(d=>liveDates.has(d));const isAdminLocked=lockedTOWeeks.has(key);weekBlocks.push({block,key,isLive,isAdminLocked});}
+  const today2=todayStr();
+  const todayRef=useRef(null);
+  const scrollContainerRef=useRef(null);
+  // Global mouseup to complete drag if released outside a cell
+  useEffect(()=>{
+    const up=()=>{
+      if(drag){
+        if(dragDates.length>0){setPicker({empName:drag.empName,group:drag.group,dates:dragDates});}
+        setDrag(null);setDragEnd(null);
+      }
+    };
+    window.addEventListener("mouseup",up);
+    return()=>window.removeEventListener("mouseup",up);
+  },[drag,dragDates]);
+  useEffect(()=>{
+    const sc=scrollContainerRef.current;
+    const el=todayRef.current;
+    if(sc&&el){
+      setTimeout(()=>{
+        const left=el.offsetLeft-(sc.clientWidth/2)+(el.offsetWidth/2);
+        sc.scrollLeft=Math.max(0,left);
+      },50);
+    }
+  },[calDates]);
+  return(
+    <div>
+      <DualScroll showTop={true} scrollRef={scrollContainerRef}>
+      <table style={{borderCollapse:"separate",borderSpacing:0,minWidth:"max-content",background:"#fff",borderRadius:8,overflow:"hidden",boxShadow:"0 1px 3px rgba(0,0,0,0.06)"}}>
+        <thead>
+          <tr style={{background:"#f8fafc"}}>
+            <th style={{position:"sticky",left:0,zIndex:11,background:"#f8fafc",minWidth:110,padding:"5px 8px",borderBottom:"1px solid #e2e8f0",borderRight:"2px solid #e2e8f0",fontSize:9,color:"#64748b",fontWeight:700,textAlign:"left"}}>STAFF</th>
+            {weekBlocks.map(({block,key,isLive,isAdminLocked},wbi)=>(
+              <th key={key} colSpan={7} style={{background:"#f8fafc",borderBottom:"1px solid #e2e8f0",borderLeft:wbi>0?"2px solid #e2e8f0":"none",padding:"4px 8px",textAlign:"left",whiteSpace:"nowrap"}}>
+                <div style={{display:"flex",alignItems:"center",gap:6}}>
+                  <span style={{fontSize:8,color:"#64748b",fontWeight:700}}>{block[0]} – {block[6]}</span>
+                  {isLive&&<span style={{fontSize:7,background:"#dcfce7",border:"1px solid #86efac",color:"#15803d",borderRadius:10,padding:"1px 5px",fontWeight:700}}>🔒 LIVE</span>}
+                  {!isLive&&(isAdminLocked
+                    ?<span style={{fontSize:7,background:"#fef3c7",border:"1px solid #f59e0b",color:"#92400e",borderRadius:10,padding:"1px 5px",fontWeight:700}}>🔐 LOCKED</span>
+                    :<span style={{fontSize:7,background:"#f1f5f9",border:"1px solid #e2e8f0",color:"#64748b",borderRadius:10,padding:"1px 5px",fontWeight:600}}>🔓 Open</span>
+                  )}
+                  {isUnlocked&&!isLive&&<button onClick={()=>onRequestWeekUnlock(key,isAdminLocked)} style={{fontSize:7,padding:"1px 6px",borderRadius:4,border:"1px solid #e2e8f0",background:"none",color:"#94a3b8",cursor:"pointer"}}>{isAdminLocked?"🔓 Unlock":"🔐 Lock"}</button>}
+                </div>
+              </th>
+            ))}
+          </tr>
+          <tr style={{background:"#f8fafc"}}>
+            <th style={{position:"sticky",left:0,zIndex:11,background:"#f8fafc",padding:"3px 8px",borderBottom:"2px solid #e2e8f0",borderRight:"2px solid #e2e8f0"}}/>
+            {weekBlocks.map(({block,key},wbi)=>block.map((date,di)=>(
+              <th key={`${key}-${di}`} ref={date===today2?todayRef:null} style={{padding:"3px 2px",textAlign:"center",fontSize:9,fontWeight:700,color:"#475569",borderBottom:"2px solid #e2e8f0",borderLeft:di===0&&wbi>0?"2px solid #e2e8f0":"none",minWidth:TO_COL_W,background:date===today2?"#eff6ff":"#f8fafc"}}>
+                <div>{DAYS[di]}</div>
+                <div style={{fontSize:7,color:date===today2?"#3b82f6":"#94a3b8",fontWeight:400}}>{date}</div>
+              </th>
+            )))}
+          </tr>
+        </thead>
+        <tbody>
+          {allEmps.map((emp,ei)=>{
+            const isPinUnlocked=staffUnlocked.has(`${emp.name}||${emp.group}`);
+            const canEdit=isUnlocked||isPinUnlocked;
+            const gc=C[emp.group]||DEF[emp.group]||DEF.Tech;
+            return(
+              <tr key={`${emp.name}||${emp.group}`} style={{background:ei%2===0?"#fff":gc.gbg+"33"}}>
+                <td style={{padding:"3px 8px",verticalAlign:"middle",position:"sticky",left:0,background:ei%2===0?"#fff":gc.gbg+"66",zIndex:3,borderRight:"2px solid #e2e8f0",whiteSpace:"nowrap",borderBottom:"1px solid #f1f5f9"}}>
+                  <div style={{display:"flex",alignItems:"center",gap:4}}>
+                    <div style={{width:5,height:5,borderRadius:"50%",background:gc.acc,flexShrink:0}}/>
+                    <span style={{fontWeight:600,fontSize:10,color:"#1e293b"}}>{emp.name}</span>
+                    {!isUnlocked&&<button onClick={()=>onRequestStaffPin(emp.name,emp.group)} style={{marginLeft:2,padding:"1px 4px",borderRadius:3,border:`1px solid ${isPinUnlocked?gc.acc:"#e2e8f0"}`,background:isPinUnlocked?gc.cbg:"none",color:isPinUnlocked?gc.acc:"#94a3b8",fontSize:7,cursor:"pointer"}}>{isPinUnlocked?"🔓":"🔒"}</button>}
+                  </div>
+                </td>
+                {weekBlocks.map(({block,key},wbi)=>{
+                  const cells=[];let di=0;
+                  const renderedReqIds=new Set();
+                  while(di<block.length){
+                    const date=block[di];
+                    const locked=isDateLocked(date,isUnlocked);
+                    // Find a request that includes this date and hasn't been rendered yet in this block
+                    // Either it starts on this date, or it started in a previous week (dates[0] not in this block)
+                    const req=requests.find(r=>
+                      !renderedReqIds.has(r.id)&&
+                      r.empName===emp.name&&r.group===emp.group&&
+                      r.dates.includes(date)&&
+                      (r.dates[0]===date||!block.includes(r.dates[0]))
+                    );
+                    const isDrag=drag&&drag.empName===emp.name&&drag.group===emp.group&&dragDates.includes(date);
+                    const isSuperAvail=availability.has(`${emp.name}||${emp.group}||${date}`);
+                    const isToday=date===today2;
+                    const lb=di===0&&wbi>0?"2px solid #e2e8f0":"none";
+                    if(req){
+                      renderedReqIds.add(req.id);
+                      // Count how many of this request's dates are in this block at or after current position
+                      const datesInBlockFromHere=req.dates.filter(d=>{
+                        const idx=block.indexOf(d);
+                        return idx>=di;
+                      });
+                      const spanCols=Math.max(1,Math.min(datesInBlockFromHere.length,block.length-di));
+                      const isContinuation=req.dates[0]!==date;
+                      cells.push(<td key={`${key}-${di}`} colSpan={spanCols} style={{padding:"2px 1px",verticalAlign:"top",width:TO_COL_W*spanCols,borderLeft:lb,borderBottom:"1px solid #f1f5f9",height:"1px"}}
+                        onMouseDown={e=>{if(locked||!canEdit)return;setDrag({empName:emp.name,group:emp.group,start:date});setDragEnd(date);}}
+                        onMouseEnter={()=>{if(drag&&drag.empName===emp.name&&drag.group===emp.group)setDragEnd(date);}}
+                        onMouseUp={()=>{if(drag&&drag.empName===emp.name&&drag.group===emp.group){const d2=dragDates.length?dragDates:[date];setPicker({empName:emp.name,group:emp.group,dates:d2});setDrag(null);setDragEnd(null);}}}>
+                        <div style={{background:reqBg(req,emp.group),border:`${req.status==="PENDING"?"2px dashed":"1px solid"} ${reqBo(req,emp.group)}`,borderRadius:isContinuation?"0 4px 4px 0":"4px",padding:"2px 4px",minHeight:req.status==="PENDING"?44:38,height:"100%",userSelect:"none",overflow:"hidden",borderLeft:isContinuation?"none":undefined,boxSizing:"border-box"}}>
+                          {!isContinuation&&req.status==="PENDING"&&<div style={{fontSize:6,fontWeight:700,color:reqTx(req,emp.group)}}>⏳</div>}
+                          {!isContinuation&&req.status==="APPROVED"&&<div style={{fontSize:6,fontWeight:700,color:reqTx(req,emp.group)}}>✓ approved</div>}
+                          {!isContinuation&&<div style={{fontSize:8,fontWeight:700,color:reqTx(req,emp.group)}}>{REQ_TYPES[req.type]?.s||req.type}</div>}
+                          {!isContinuation&&req.dates.length>1&&<div style={{fontSize:6,color:reqTx(req,emp.group),opacity:0.7}}>{req.dates.length}d</div>}
+                          {isContinuation&&<div style={{fontSize:6,color:reqTx(req,emp.group),opacity:0.6}}>↩ {REQ_TYPES[req.type]?.s||req.type}</div>}
+                          {!isContinuation&&req.status==="PENDING"&&isUnlocked&&<div style={{display:"flex",gap:2,marginTop:1}} onMouseDown={e=>e.stopPropagation()} onClick={e=>e.stopPropagation()}><Btn onClick={()=>approveReq(req.id)} variant="success" style={{flex:1,padding:"1px",fontSize:6}}>✓</Btn><Btn onClick={()=>denyReq(req.id)} variant="danger" style={{flex:1,padding:"1px",fontSize:6}}>✕</Btn></div>}
+                        </div>
+                      </td>);
+                      di+=spanCols;
+                    }else{
+                      cells.push(<td key={`${key}-${di}`} style={{padding:"2px 1px",verticalAlign:"top",opacity:locked?0.45:1,borderLeft:lb,borderBottom:"1px solid #f1f5f9",background:isToday?"#f0f9ff":"none"}}
+                        onMouseDown={e=>{if(locked||!canEdit)return;setDrag({empName:emp.name,group:emp.group,start:date});setDragEnd(date);}}
+                        onMouseEnter={()=>{if(drag&&drag.empName===emp.name&&drag.group===emp.group)setDragEnd(date);}}
+                        onMouseUp={()=>{if(drag&&drag.empName===emp.name&&drag.group===emp.group){const d2=dragDates.length?dragDates:[date];setPicker({empName:emp.name,group:emp.group,dates:d2});setDrag(null);setDragEnd(null);}}}> 
+                        <div style={{background:isSuperAvail?"#ecfdf5":isDrag?"#fed7aa":locked?"#f1f5f9":canEdit?gc.cbg+"44":gc.cbg+"22",border:`1px solid ${isSuperAvail?"#6ee7b7":isDrag?"#fb923c":locked?"#e2e8f0":gc.cbo+"55"}`,borderRadius:4,minHeight:38,cursor:locked?"not-allowed":canEdit?"crosshair":"default",display:"flex",alignItems:"center",justifyContent:"center"}}>
+                          {isSuperAvail&&<span style={{fontSize:10}}>⭐</span>}
+                        </div>
+                      </td>);
+                      di++;
+                    }
+                  }
+                  return cells;
+                })}
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      </DualScroll>
+      {picker&&(
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.3)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:9000}}>
+          <div data-ov style={{background:"#fff",borderRadius:12,padding:20,width:300,boxShadow:"0 16px 48px rgba(0,0,0,0.2)"}}>
+            <div style={{fontWeight:700,fontSize:12,color:"#1e293b",marginBottom:4}}>📅 Time Off Request</div>
+            <div style={{fontSize:9,color:"#64748b",marginBottom:12}}>{picker.empName} · {picker.dates.length===1?picker.dates[0]:`${picker.dates[0]} – ${picker.dates[picker.dates.length-1]}`}</div>
+            <div style={{display:"flex",flexDirection:"column",gap:5,marginBottom:12}}>
+              {Object.entries(REQ_TYPES).filter(([k])=>k!=="CUSTOM").map(([k,{l}])=><button key={k} onClick={()=>submitReq(picker.empName,picker.group,k,picker.dates)} style={{padding:"8px 12px",borderRadius:7,border:"1px solid #e2e8f0",background:"#f8fafc",color:"#1e293b",fontSize:10,cursor:"pointer",textAlign:"left"}} onMouseEnter={e=>e.currentTarget.style.background="#eff6ff"} onMouseLeave={e=>e.currentTarget.style.background="#f8fafc"}>{l}</button>)}
+            </div>
+            <div style={{display:"flex",gap:6,marginBottom:8}}>
+              <input value={customTime} onChange={e=>setCustomTime(e.target.value)} placeholder="Custom time e.g. 9-4" style={{flex:1,background:"#f8fafc",border:"1px solid #e2e8f0",borderRadius:6,padding:"6px 10px",fontSize:10,outline:"none",color:"#1e293b"}}/>
+              <Btn onClick={()=>{if(customTime.trim())submitReq(picker.empName,picker.group,"CUSTOM",picker.dates,customTime.trim());}} variant="primary" disabled={!customTime.trim()} style={{fontSize:9}}>Add</Btn>
+            </div>
+            <div style={{borderTop:"1px solid #f1f5f9",paddingTop:8,marginTop:4}}>
+              <div style={{fontSize:8,color:"#94a3b8",marginBottom:6,fontWeight:600}}>SUPER AVAILABLE</div>
+              {picker.dates.map(d=>{const k=`${picker.empName}||${picker.group}||${d}`;const isAvail=availability.has(k);return <button key={d} onClick={()=>setAvailability(prev=>{const n=new Set(prev);isAvail?n.delete(k):n.add(k);return n;})} style={{display:"block",width:"100%",padding:"5px 10px",marginBottom:3,borderRadius:5,border:`1px solid ${isAvail?"#6ee7b7":"#e2e8f0"}`,background:isAvail?"#ecfdf5":"none",color:isAvail?"#15803d":"#64748b",fontSize:9,cursor:"pointer",textAlign:"left"}}>⭐ {d} {isAvail?"(remove)":"mark available"}</button>;})}
+            </div>
+            <Btn onClick={()=>setPicker(null)} style={{width:"100%",marginTop:8,fontSize:9}}>Cancel</Btn>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ══ TIME OFF PAGE ───────────────────────────────────────────────── */
+function TimeOffPage({requests,setRequests,masterWeeks,setMasterWeeks,liveWeeks,lockedTOWeeks,setLockedTOWeeks,isUnlocked,staffUnlocked,staffPins,onRequestStaffPin,pwd,pwd2,C,availability,setAvailability}){
+  const nowMonth=useMemo(()=>new Date(),[]);
+  const[calStart,setCalStart]=useState(()=>new Date(nowMonth.getFullYear(),nowMonth.getMonth(),1));
+  const[adminConfirm,setAdminConfirm]=useState(null);
+  const calDates=useMemo(()=>getCalDates(calStart),[calStart]);
+  const allEmps=useMemo(()=>getOrder([...liveWeeks,...masterWeeks]),[liveWeeks,masterWeeks]);
+  const liveDates=useMemo(()=>getLiveDates(liveWeeks),[liveWeeks]);
+  const prevM=()=>setCalStart(d=>{const n=new Date(d.getFullYear(),d.getMonth()-1,1);return n<MIN_CAL?d:n;});
+  const nextM=()=>setCalStart(d=>new Date(d.getFullYear(),d.getMonth()+1,1));
+  const onRequestWeekUnlock=(key,currentlyLocked)=>setAdminConfirm({key,lock:!currentlyLocked,prompt:currentlyLocked?"Unlock this week for editing?":"Lock this week from editing?"});
+  const handleWeekLockConfirm=()=>{if(!adminConfirm)return;setLockedTOWeeks(prev=>{const n=new Set(prev);adminConfirm.lock?n.add(adminConfirm.key):n.delete(adminConfirm.key);return n;});};
+  return(
+    <div>
+      {adminConfirm&&<AdminConfirmModal prompt={adminConfirm.prompt} pwd={pwd} pwd2={pwd2} onConfirm={handleWeekLockConfirm} onClose={()=>setAdminConfirm(null)}/>}
+      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12,padding:"10px 14px",background:"#fff",border:"1px solid #e2e8f0",borderRadius:9,boxShadow:"0 1px 3px rgba(0,0,0,0.06)",flexWrap:"wrap"}}>
+        <div style={{fontWeight:800,fontSize:13,color:"#1e293b"}}>TIME OFF REQUESTS</div>
+        <div style={{fontSize:9,color:"#94a3b8"}}>{requests.filter(r=>r.status==="PENDING").length} pending</div>
+        <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:8}}>
+          <Btn onClick={prevM}>‹</Btn>
+          <span style={{fontWeight:700,fontSize:12,color:"#1e293b",minWidth:150,textAlign:"center"}}>{calStart.toLocaleString("default",{month:"long",year:"numeric"})}</span>
+          <Btn onClick={nextM}>›</Btn>
+        </div>
+      </div>
+      <TOCalendar calDates={calDates} lockedTOWeeks={lockedTOWeeks} liveDates={liveDates} requests={requests} setRequests={setRequests} masterWeeks={masterWeeks} setMasterWeeks={setMasterWeeks} allEmps={allEmps} isUnlocked={isUnlocked} staffUnlocked={staffUnlocked} staffPins={staffPins} onRequestStaffPin={onRequestStaffPin} onRequestWeekUnlock={onRequestWeekUnlock} C={C} availability={availability} setAvailability={setAvailability}/>
+    </div>
+  );
+}
+
+/* ══ MASTER PAGE ─────────────────────────────────────────────────── */
+function MasterPage({masterWeeks,setMasterWeeks,liveWeeks,setLiveWeeks,masterArchived,setMasterArchived,liveArchived,isUnlocked,C,onSC,onRC,requests,setRequests,addAudit,pwd,pwd2,pushUndo,customDayLabels}){
+  const[masterTab,setMasterTab]=useState("active");
+  const[coverageModal,setCoverageModal]=useState(null);
+  const[newEmpModal,setNewEmpModal]=useState(null);
+  const[newEmpName,setNewEmpName]=useState("");
+  const[deleteConfirm,setDeleteConfirm]=useState(null);
+
+  const addWeek=()=>{
+    const pool=[...masterWeeks,...masterArchived];
+    const last=sortWeeks(pool).slice(-1)[0];
+    const dates=last?nextDates(last.dates):Array(7).fill("").map((_,i)=>{const d=new Date();d.setDate(d.getDate()+i);return`${d.getDate()}-${MON[d.getMonth()]}`;});
+    const ng={};const refWeek=masterWeeks.slice(-1)[0]||masterArchived.slice(-1)[0];
+    GROUPS.forEach(g=>{ng[g]=(refWeek?.groups[g]||[]).map(e=>({...e,id:uid(),shifts:dates.map((_,i)=>i===6?mkCl():mk(""))}));});
+    setMasterWeeks(prev=>sortWeeks([...prev,{id:uid(),label:wkLabel(dates),dates,published:false,groups:ng}]));
+  };
+
+  const updM=(wid,g,ei,si,patch)=>setMasterWeeks(prev=>prev.map(w=>{if(w.id!==wid)return w;return{...w,groups:{...w.groups,[g]:w.groups[g].map((emp,i)=>i!==ei?emp:{...emp,shifts:emp.shifts.map((s,j)=>j!==si?s:{...s,...patch})})}};}));
+  const appReqM=(wid,g,ei,si)=>{const s=masterWeeks.find(w=>w.id===wid)?.groups[g]?.[ei]?.shifts[si];updM(wid,g,ei,si,{reqSt:"APPROVED"});if(s?.reqId)setRequests(prev=>prev.map(r=>r.id===s.reqId?{...r,status:"APPROVED"}:r));};
+  const denyReqM=(wid,g,ei,si)=>{const s=masterWeeks.find(w=>w.id===wid)?.groups[g]?.[ei]?.shifts[si];updM(wid,g,ei,si,{t:"",h:0,st:null,reqSt:"DENIED",reqId:null});if(s?.reqId)setRequests(prev=>prev.map(r=>r.id===s.reqId?{...r,status:"DENIED"}:r));};
+  const moveEmp=(wid,g,ei,dir)=>{setMasterWeeks(prev=>prev.map(w=>{if(w.id!==wid)return w;const arr=[...(w.groups[g]||[])];const ti=ei+dir;if(ti<0||ti>=arr.length)return w;[arr[ei],arr[ti]]=[arr[ti],arr[ei]];return{...w,groups:{...w.groups,[g]:arr}};}));};
+  const renameEmp=(wid,g,ei,name)=>{setMasterWeeks(prev=>prev.map(w=>w.id!==wid?w:{...w,groups:{...w.groups,[g]:w.groups[g].map((e,i)=>i!==ei?e:{...e,name})}}));};
+
+  const confirmAddEmp=()=>{
+    if(!newEmpName.trim()||!newEmpModal)return;
+    const name=newEmpName.trim();const{weekId,grp}=newEmpModal;
+    const sorted2=sortWeeks(masterWeeks);const fi=sorted2.findIndex(w=>w.id===weekId);
+    setMasterWeeks(prev=>{
+      const s2=sortWeeks(prev);
+      return prev.map(w=>{
+        const wi=s2.findIndex(x=>x.id===w.id);if(wi<fi)return w;
+        const alreadyHas=(w.groups[grp]||[]).some(e=>e.name===name);if(alreadyHas)return w;
+        return{...w,groups:{...w.groups,[grp]:[...(w.groups[grp]||[]),{id:uid(),name,shifts:w.dates.map((_,i)=>i===6?mkCl():mk(""))}]}};
+      });
+    });
+    pushUndo&&pushUndo({type:"addEmp",name,grp,weekId});
+    addAudit("Admin",`Added ${name} to ${grp} from week ${weekId}`);
+    setNewEmpModal(null);setNewEmpName("");
+  };
+
+  const confirmDelEmp=()=>{
+    if(!deleteConfirm)return;
+    const{weekId,group:grp,name}=deleteConfirm;
+    const snapshot=deepClone(masterWeeks);
+    pushUndo&&pushUndo({type:"delEmp",snapshot});
+    setMasterWeeks(prev=>{
+      const s2=sortWeeks(prev);const fi=s2.findIndex(w=>w.id===weekId);
+      return prev.map(w=>{
+        const wi=s2.findIndex(x=>x.id===w.id);if(wi<fi)return w;
+        return{...w,groups:{...w.groups,[grp]:(w.groups[grp]||[]).filter(e=>e.name!==name)}};
+      });
+    });
+    addAudit("Admin",`Deleted ${name} from ${grp} from week ${weekId} onward`);
+    setDeleteConfirm(null);
+  };
+
+  const doPublish=wid=>{
+    setMasterWeeks(prev=>prev.map(w=>w.id===wid?{...w,published:true}:w));
+    setLiveWeeks(prev=>{const wk=masterWeeks.find(w=>w.id===wid);if(!wk)return prev;if(prev.some(w=>w.id===wid))return prev.map(w=>w.id===wid?{...deepClone(wk),approved:true}:w);return sortWeeks([...prev,{...deepClone(wk),approved:true}]);});
+    addAudit("Admin",`Published week ${wid}`);
+  };
+  const publishWeek=wid=>{const wk=masterWeeks.find(w=>w.id===wid);if(!wk)return;const flags=checkCoverage(wk);if(flags.length>0){setCoverageModal({weekId:wid,flags});return;}doPublish(wid);};
+  const unpublishWeek=wid=>{setMasterWeeks(prev=>prev.map(w=>w.id===wid?{...w,published:false}:w));setLiveWeeks(prev=>prev.filter(w=>w.id!==wid));};
+  const archiveMasterWeek=wid=>{setMasterWeeks(prev=>{const w=prev.find(x=>x.id===wid);if(w)setMasterArchived(a=>{if(a.some(x=>x.id===wid))return a;return sortWeeks([...a,deepClone(w)]);});return prev.filter(x=>x.id!==wid);});};
+  const restoreMasterArchived=wid=>{setMasterArchived(prev=>{const w=prev.find(x=>x.id===wid);if(w)setMasterWeeks(m=>{if(m.some(x=>x.id===wid))return m;return sortWeeks([...m,deepClone(w)]);});return prev.filter(x=>x.id!==wid);});};
+  const pickerPos=rect=>{const ph=300;const y=(window.innerHeight-rect.bottom)>ph?rect.bottom+4:Math.max(60,rect.top-ph-4);return{x:Math.min(rect.left,window.innerWidth-258),y};};
+
+  const renderWeekCard=(week,isArchived)=>{
+    const isLive=liveWeeks.some(w=>w.id===week.id);
+    const isLiveArchived=(liveArchived||[]).some(w=>w.id===week.id);
+    const isLocked=isArchived||isLiveArchived;
+    const pendingInWeek=requests.some(r=>r.status==="PENDING"&&week.dates.includes(r.dates&&r.dates[0]));
+    return(
+      <div key={week.id} style={{minWidth:860,background:"#fff",border:`1px solid ${isLiveArchived?"#fde047":"#e2e8f0"}`,borderRadius:10,padding:14,boxShadow:"0 1px 4px rgba(0,0,0,0.07)",flexShrink:0}}>
+        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10,flexWrap:"wrap"}}>
+          <span style={{fontWeight:800,fontSize:13,color:"#1e293b"}}>{week.label}</span>
+          <span style={{fontSize:8,color:"#94a3b8"}}>{week.dates.filter(Boolean).join(" · ")}</span>
+          {pendingInWeek&&<span style={{fontSize:9,color:"#92400e",background:"#fef3c7",border:"1px solid #f59e0b",borderRadius:20,padding:"2px 8px",fontWeight:700}}>⏳ Pending</span>}
+          {isArchived&&!isLiveArchived&&<span style={{fontSize:9,color:"#64748b",background:"#f1f5f9",border:"1px solid #e2e8f0",borderRadius:20,padding:"2px 8px",fontWeight:600}}>📦 Archived</span>}
+          {isLiveArchived&&<span style={{fontSize:9,color:"#b45309",background:"#fef9c3",border:"1px solid #fde047",borderRadius:20,padding:"2px 8px",fontWeight:700}}>📦 Live Archived — read only</span>}
+          <div style={{marginLeft:"auto",display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+            {!isArchived&&isLive&&!isLiveArchived&&<span style={{fontSize:9,color:"#15803d",background:"#dcfce7",border:"1px solid #86efac",borderRadius:20,padding:"3px 8px",fontWeight:600}}>✓ LIVE</span>}
+            {!isArchived&&isUnlocked&&!isLive&&!isLiveArchived&&<Btn onClick={()=>publishWeek(week.id)} variant="primary" style={{fontSize:9}}>✓ Publish to Live</Btn>}
+            {!isArchived&&isUnlocked&&isLive&&!isLiveArchived&&<Btn onClick={()=>unpublishWeek(week.id)} style={{fontSize:9}}>↩ Unpublish</Btn>}
+            {!isArchived&&isUnlocked&&!isLiveArchived&&<Btn onClick={()=>archiveMasterWeek(week.id)} style={{fontSize:9,color:"#d97706",border:"1px solid #fde047",background:"#fef9c3"}}>📦 Archive</Btn>}
+            {isArchived&&isUnlocked&&<Btn onClick={()=>restoreMasterArchived(week.id)} variant="success" style={{fontSize:9}}>↩ Restore</Btn>}
+          </div>
+        </div>
+        <div style={{display:"flex",paddingLeft:118,marginBottom:4}}>{DAYS.map((d,i)=><div key={d} style={{flex:1,minWidth:88,textAlign:"center"}}><div style={{fontSize:11,fontWeight:700,color:"#475569"}}>{d}</div><div style={{fontSize:8,color:"#94a3b8"}}>{(week.dates&&week.dates[i])||""}</div></div>)}<div style={{width:44}}/></div>
+        {GROUPS.map(grp=>{const gc=C[grp]||DEF[grp];return(
+          <div key={grp} style={{marginBottom:12}}>
+            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4,padding:"4px 8px",borderRadius:6,background:gc.gbg,borderLeft:`2px solid ${gc.acc}`}}>
+              <span style={{fontWeight:800,fontSize:10,color:gc.htx,letterSpacing:"0.15em"}}>{grp}</span>
+              {!isLocked&&isUnlocked&&<Btn onClick={()=>{setNewEmpModal({weekId:week.id,grp});setNewEmpName("");}} style={{marginLeft:"auto",fontSize:8,color:gc.acc,background:"none",border:`1px solid ${gc.acc}88`}}>+ ADD</Btn>}
+            </div>
+            <table style={{width:"100%",borderCollapse:"separate",borderSpacing:0,minWidth:760}}>
+              <colgroup><col style={{width:118}}/>{DAYS.map((_,i)=><col key={i} style={{minWidth:88}}/>)}<col style={{width:44}}/></colgroup>
+              <tbody>{(week.groups[grp]||[]).map((emp,ei)=>(
+                <tr key={emp.id} style={{background:ei%2===0?"#fff":gc.gbg+"66"}}>
+                  <td style={{padding:"3px 5px",verticalAlign:"middle"}}>
+                    <div style={{display:"flex",alignItems:"center",gap:3}}>
+                      {!isLocked&&isUnlocked&&<div style={{display:"flex",flexDirection:"column",gap:1,flexShrink:0}}><Btn onClick={()=>moveEmp(week.id,grp,ei,-1)} style={{padding:"1px 3px",fontSize:7,color:"#94a3b8"}}>▲</Btn><Btn onClick={()=>moveEmp(week.id,grp,ei,1)} style={{padding:"1px 3px",fontSize:7,color:"#94a3b8"}}>▼</Btn></div>}
+                      <div style={{width:4,height:4,borderRadius:"50%",background:gc.acc,flexShrink:0}}/>
+                      <input value={emp.name} onChange={e=>!isLocked&&renameEmp(week.id,grp,ei,e.target.value)} disabled={isLocked||!isUnlocked} style={{background:"none",border:"none",borderBottom:(!isLocked&&isUnlocked)?"1px solid #e2e8f0":"none",color:"#1e293b",fontWeight:600,fontSize:11,outline:"none",width:"100%",padding:"1px 2px"}}/>
+                      {!isLocked&&isUnlocked&&<Btn onClick={()=>setDeleteConfirm({weekId:week.id,group:grp,empIdx:ei,name:emp.name})} variant="danger" style={{padding:"2px 4px",fontSize:8,flexShrink:0}}>✕</Btn>}
+                    </div>
+                  </td>
+                  {emp.shifts.map((s,si)=><ShiftCell key={si} s={s} group={grp} isAdmin={!isLocked&&isUnlocked} C={C} customDayLabels={customDayLabels}
+                    onTap={rect=>{if(isLocked)return;const{x,y}=pickerPos(rect);const kt=s&&s.tg||[];onSC({weekId:week.id,group:grp,empIdx:ei,shiftIdx:si,dayIdx:si,x,y,keepTags:kt,isMaster:true});}}
+                    onLong={(x,y)=>{if(!isLocked)onRC({weekId:week.id,group:grp,empIdx:ei,shiftIdx:si,x,y,isMaster:true});}}
+                    onCtxMenu={(x,y)=>{if(!isLocked)onRC({weekId:week.id,group:grp,empIdx:ei,shiftIdx:si,x,y,isMaster:true});}}
+                    onHrs={h=>!isLocked&&updM(week.id,grp,ei,si,{h})} onSickHrs={sh=>!isLocked&&updM(week.id,grp,ei,si,{sh})}
+                    onApprove={()=>!isLocked&&appReqM(week.id,grp,ei,si)} onDeny={()=>!isLocked&&denyReqM(week.id,grp,ei,si)}/>)}
+                  <td style={{textAlign:"center",padding:"3px 2px",verticalAlign:"middle"}}>{(()=>{const tot=eTotal(emp);return <div style={{background:"#f8fafc",border:"1px solid #e2e8f0",borderRadius:5,padding:"3px 2px",fontSize:11,fontWeight:700,color:tot>=36?gc.acc:tot>=30?"#d97706":"#ef4444",textAlign:"center"}}>{tot}</div>;})()}</td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+        );})}
+      </div>
+    );
+  };
+
+  return(
+    <div>
+      {newEmpModal&&(
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.4)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:9995}}>
+          <div data-ov style={{background:"#fff",borderRadius:12,padding:24,width:300,boxShadow:"0 16px 48px rgba(0,0,0,0.2)"}}>
+            <div style={{fontWeight:700,fontSize:13,color:"#1e293b",marginBottom:8}}>➕ Add Employee to {newEmpModal.grp}</div>
+            <div style={{fontSize:9,color:"#64748b",marginBottom:12}}>Added to all future master weeks from this point onward.</div>
+            <input autoFocus value={newEmpName} onChange={e=>setNewEmpName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&confirmAddEmp()} placeholder="Employee name" style={{width:"100%",background:"#f8fafc",border:"1px solid #e2e8f0",borderRadius:7,padding:"8px 12px",color:"#1e293b",fontSize:12,outline:"none",boxSizing:"border-box",marginBottom:12}}/>
+            <div style={{display:"flex",gap:8}}><Btn onClick={confirmAddEmp} variant="primary" style={{flex:1,fontSize:11}} disabled={!newEmpName.trim()}>Add</Btn><Btn onClick={()=>{setNewEmpModal(null);setNewEmpName("");}} style={{padding:"8px 14px",fontSize:11}}>Cancel</Btn></div>
+          </div>
+        </div>
+      )}
+      {deleteConfirm&&(
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.4)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:9995}}>
+          <div data-ov style={{background:"#fff",borderRadius:12,padding:24,width:320,boxShadow:"0 16px 48px rgba(0,0,0,0.2)"}}>
+            <div style={{fontWeight:700,fontSize:13,color:"#dc2626",marginBottom:8}}>🗑 Delete Employee</div>
+            <div style={{fontSize:10,color:"#1e293b",marginBottom:6}}>Remove <strong>{deleteConfirm.name}</strong> from <strong>{deleteConfirm.group}</strong>?</div>
+            <div style={{fontSize:9,color:"#64748b",marginBottom:16}}>Removes from all master weeks from this point forward. Data is preserved in the audit log.</div>
+            <div style={{display:"flex",gap:8}}><Btn onClick={confirmDelEmp} variant="danger" style={{flex:1,fontSize:11}}>Yes, Delete</Btn><Btn onClick={()=>setDeleteConfirm(null)} style={{padding:"8px 14px",fontSize:11}}>Cancel</Btn></div>
+          </div>
+        </div>
+      )}
+      {coverageModal&&(
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:9994}}>
+          <div data-ov style={{background:"#fff",borderRadius:14,padding:24,width:420,maxHeight:"80vh",overflowY:"auto",boxShadow:"0 24px 64px rgba(0,0,0,0.2)"}}>
+            <div style={{fontWeight:800,fontSize:13,color:"#dc2626",marginBottom:4}}>⚠️ Coverage Flags</div>
+            <div style={{fontSize:9,color:"#64748b",marginBottom:14}}>Coverage rules not met. Override and publish anyway, or go back and fix.</div>
+            <div style={{display:"flex",flexDirection:"column",gap:6,marginBottom:16}}>
+              {coverageModal.flags.map((f,i)=>(
+                <div key={i} style={{padding:"8px 12px",background:f.group==="Tech"?"#f0fdf4":"#fefce8",border:`1px solid ${f.group==="Tech"?"#86efac":"#fde047"}`,borderRadius:7}}>
+                  <div style={{fontSize:9,fontWeight:700,color:f.group==="Tech"?"#15803d":"#b45309"}}>{f.group} · {f.day}</div>
+                  <div style={{fontSize:10,color:"#374151",marginTop:2}}>{f.msg}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{display:"flex",gap:8}}>
+              <Btn onClick={()=>{doPublish(coverageModal.weekId);setCoverageModal(null);}} variant="danger" style={{flex:1,fontSize:10}}>⚠️ Override & Publish</Btn>
+              <Btn onClick={()=>setCoverageModal(null)} style={{padding:"8px 14px",fontSize:10}}>← Go Back</Btn>
+            </div>
+          </div>
+        </div>
+      )}
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16,padding:"9px 14px",background:"#fff",border:"1px solid #e2e8f0",borderRadius:9,boxShadow:"0 1px 3px rgba(0,0,0,0.06)"}}>
+        <div style={{display:"flex",gap:4,alignItems:"center"}}>
+          <button onClick={()=>setMasterTab("active")} style={{padding:"6px 14px",borderRadius:7,border:`1px solid ${masterTab==="active"?"#3b82f6":"#e2e8f0"}`,background:masterTab==="active"?"#eff6ff":"none",color:masterTab==="active"?"#1d4ed8":"#64748b",fontSize:10,cursor:"pointer",fontWeight:masterTab==="active"?700:400}}>⚙ Master Schedule</button>
+          <button onClick={()=>setMasterTab("archive")} style={{padding:"6px 14px",borderRadius:7,border:`1px solid ${masterTab==="archive"?"#d97706":"#e2e8f0"}`,background:masterTab==="archive"?"#fef9c3":"none",color:masterTab==="archive"?"#92400e":"#64748b",fontSize:10,cursor:"pointer",fontWeight:masterTab==="archive"?700:400,position:"relative"}}>
+            📦 Master Archive{masterArchived.length>0&&<span style={{marginLeft:4,background:"#d97706",color:"#fff",borderRadius:10,fontSize:7,padding:"1px 5px",fontWeight:700}}>{masterArchived.length}</span>}
+          </button>
+        </div>
+        <div style={{display:"flex",gap:6,alignItems:"center"}}>
+          {masterTab==="active"&&isUnlocked&&<Btn onClick={addWeek} variant="primary">+ NEW WEEK</Btn>}
+        </div>
+      </div>
+      {masterTab==="active"&&(<DualScroll showTop={true}><div style={{display:"flex",gap:14,alignItems:"flex-start",paddingBottom:24}}>{masterWeeks.length===0&&<div style={{padding:40,color:"#94a3b8",fontSize:11}}>No master weeks.</div>}{masterWeeks.map(week=>renderWeekCard(week,false))}</div></DualScroll>)}
+      {masterTab==="archive"&&(<DualScroll showTop={true}><div style={{display:"flex",gap:14,alignItems:"flex-start",paddingBottom:24}}>{masterArchived.length===0&&<div style={{padding:40,color:"#94a3b8",fontSize:11}}>No archived master weeks.</div>}{masterArchived.map(week=>renderWeekCard(week,true))}</div></DualScroll>)}
+    </div>
+  );
+}
+
+/* ══ PAST SCHEDULES ──────────────────────────────────────────────── */
+function PastSchedules({archived,onUnarchive,isUnlocked,C}){
+  const tabs=[...new Set(archived.map(monthYear))];
+  const[active,setActive]=useState(null);
+  useEffect(()=>{if(tabs.length&&!tabs.includes(active))setActive(tabs[0]);},[archived.length]);
+  if(!archived.length)return <div style={{textAlign:"center",padding:60,color:"#94a3b8",fontSize:11}}><div style={{fontSize:32,marginBottom:8}}>📦</div>No past schedules yet.</div>;
+  const cur=active||tabs[0];const tw=archived.filter(w=>monthYear(w)===cur);
+  const allNames={};GROUPS.forEach(g=>{allNames[g]=[];const seen=new Set();tw.forEach(w=>(w.groups[g]||[]).forEach(e=>{if(!seen.has(e.name)){seen.add(e.name);allNames[g].push(e.name);}}));});
+  const total=1+tw.length*8;const customC=(C||DEF).CUSTOM||DEF.CUSTOM;
+  return(
+    <div>
+      <div style={{display:"flex",gap:6,marginBottom:14,flexWrap:"wrap"}}>{tabs.map(t=><button key={t} onClick={()=>setActive(t)} style={{padding:"5px 14px",borderRadius:7,border:`1px solid ${cur===t?"#3b82f6":"#e2e8f0"}`,background:cur===t?"#eff6ff":"#fff",color:cur===t?"#1d4ed8":"#64748b",fontSize:9,cursor:"pointer",fontWeight:cur===t?700:400}}>{t}</button>)}</div>
+      {tw.length===0?<div style={{textAlign:"center",padding:40,color:"#94a3b8",fontSize:11}}>No weeks here.</div>:(
+        <DualScroll>
+          <table style={{borderCollapse:"separate",borderSpacing:0,minWidth:"max-content",background:"#fff",borderRadius:8,overflow:"hidden",boxShadow:"0 1px 4px rgba(0,0,0,0.08)"}}>
+            <thead><tr style={{background:"#f8fafc"}}>
+              <th style={{position:"sticky",left:0,zIndex:11,background:"#f8fafc",minWidth:118,padding:"6px 10px",borderBottom:"2px solid #e2e8f0",borderRight:"2px solid #e2e8f0",fontSize:9,color:"#64748b",textAlign:"left",fontWeight:700}}>STAFF</th>
+              {tw.map((w,wi)=><th key={w.id} colSpan={8} style={{background:"#f8fafc",borderBottom:"2px solid #e2e8f0",borderLeft:wi>0?"2px solid #e2e8f0":"none",padding:"6px 10px",fontWeight:700,fontSize:13,color:"#1e293b",textAlign:"left",whiteSpace:"nowrap"}}>
+                <div style={{display:"flex",alignItems:"center",gap:7}}><span>{w.label}</span>{isUnlocked&&<Btn onClick={()=>onUnarchive(w.id)} variant="success" style={{fontSize:7,padding:"2px 6px"}}>↩ Restore</Btn>}</div>
+              </th>)}
+            </tr></thead>
+            <tbody>{GROUPS.flatMap(grp=>{
+              const gc=(C||DEF)[grp]||DEF[grp];const names=allNames[grp];
+              return[
+                <tr key={`gh-${grp}`} style={{background:gc.gbg}}><td colSpan={total} style={{padding:"4px 12px",borderTop:"2px solid #e2e8f0"}}><span style={{fontWeight:800,fontSize:11,color:gc.htx,letterSpacing:"0.15em",textTransform:"uppercase"}}>{grp}</span></td></tr>,
+                <tr key={`dh-${grp}`} style={{background:gc.gbg}}>
+                  <td style={{position:"sticky",left:0,zIndex:6,background:gc.gbg,padding:"2px 10px",borderRight:"2px solid #e2e8f0",borderBottom:"1px solid #e2e8f0"}}/>
+                  {tw.flatMap((w,wi)=>[...DAYS.map((d,di)=><td key={`${w.id}-${grp}-${d}`} style={{textAlign:"center",padding:"3px 2px",fontSize:11,fontWeight:700,color:gc.htx,borderLeft:di===0&&wi>0?"2px solid #e2e8f0":"none",borderBottom:"1px solid #e2e8f0",minWidth:88,background:gc.gbg}}><div>{d}</div><div style={{fontSize:8,color:gc.acc,fontWeight:400}}>{w.dates?.[di]||""}</div></td>),<td key={`${w.id}-${grp}-h`} style={{textAlign:"center",padding:"2px 4px",fontSize:8,color:gc.acc,borderLeft:"1px solid #e2e8f0",borderBottom:"1px solid #e2e8f0",background:gc.gbg,fontWeight:600}}>HRS</td>])}
+                </tr>,
+                ...names.map((name,ni)=>(
+                  <tr key={`${grp}-${name}`} style={{background:ni%2===0?"#fff":gc.gbg+"88"}}>
+                    <td style={{position:"sticky",left:0,zIndex:5,background:ni%2===0?"#fff":gc.gbg+"cc",padding:"3px 10px",verticalAlign:"middle",borderRight:"2px solid #e2e8f0",whiteSpace:"nowrap"}}>
+                      <div style={{display:"flex",alignItems:"center",gap:5}}><div style={{width:6,height:6,borderRadius:"50%",background:gc.acc,flexShrink:0}}/><span style={{fontWeight:600,fontSize:11,color:"#1e293b"}}>{name}</span></div>
+                    </td>
+                    {tw.flatMap((week,wi)=>{
+                      const ei=(week.groups[grp]||[]).findIndex(e=>e.name===name);const emp=ei>=0?week.groups[grp][ei]:null;
+                      const tot=emp?eTotal(emp):0;const tC=tot>=36?gc.acc:tot>=30?"#d97706":"#ef4444";
+                      const cells=emp?emp.shifts.map((s,si)=>{const sc2=getC(s,grp,C||DEF);return <td key={`${week.id}-${si}`} style={{padding:"3px 2px",...(si===0&&wi>0?{borderLeft:"2px solid #e2e8f0"}:{})}}><div style={{background:sc2.bg,border:`1px solid ${sc2.bo}`,borderRadius:6,padding:"5px 7px",minHeight:52,display:"flex",flexDirection:"column",position:"relative"}}>{s?.st==="VAC"&&<div style={{fontSize:12,fontWeight:700,color:sc2.tx}}>🌴 VAC</div>}{s?.st==="OFF"&&<div style={{fontSize:11,color:sc2.tx}}>OFF</div>}{s?.st==="CLOSED"&&<div style={{fontSize:10,color:sc2.tx,fontWeight:600}}>CLOSED</div>}{s?.st==="CUSTOM"&&<div style={{fontSize:10,fontWeight:700,color:customC.tx}}>⭐ {s.customLabel||"Custom"}</div>}{s?.st==="SICK"&&<div style={{fontSize:9,color:sc2.tx,fontWeight:700}}>🤒 SICK{s.sh?` ${s.sh}h`:""}</div>}{!s?.st&&s?.t&&<div style={{fontSize:12,fontWeight:700,color:sc2.tx}}>{s.t}</div>}{s?.swapped&&<div style={{position:"absolute",bottom:3,right:4,fontSize:7,color:sc2.tx,fontWeight:700,opacity:0.8}}>↔ swapped</div>}</div></td>;}):Array(7).fill(0).map((_,si)=><td key={`${week.id}-e${si}`} style={{padding:"3px 2px",...(si===0&&wi>0?{borderLeft:"2px solid #e2e8f0"}:{})}}><div style={{background:EC.bg,border:`1px solid ${EC.bo}`,borderRadius:6,minHeight:52}}/></td>);
+                      return[...cells,<td key={`${week.id}-tot`} style={{padding:"3px 5px",verticalAlign:"middle",borderLeft:"1px solid #e2e8f0"}}>{emp&&<div style={{background:"#f8fafc",border:"1px solid #e2e8f0",borderRadius:5,padding:"4px",fontSize:12,fontWeight:700,color:tC,textAlign:"center",minWidth:36}}>{tot}</div>}</td>];
+                    })}
+                  </tr>
+                ))
+              ];
+            })}</tbody>
+          </table>
+        </DualScroll>
+      )}
+    </div>
+  );
+}
+
+/* ══ UNIFIED STATS & PAST REQUESTS ──────────────────────────────── */
+function StatsAndRequestsPage({requests,weeks,liveArchived,masterArchived,C}){
+  const[tab,setTab]=useState("hours");
+  const[mi,setMi]=useState(new Date().getMonth());const[period,setPeriod]=useState(2);
+  const[expanded,setExpanded]=useState(new Set());
+  const toggle=k=>setExpanded(p=>{const n=new Set(p);n.has(k)?n.delete(k):n.add(k);return n;});
+  const allWeeks=useMemo(()=>[...weeks.filter(w=>w.approved),...liveArchived,...masterArchived],[weeks,liveArchived,masterArchived]);
+  const order=getOrder(allWeeks);
+  const rows=order.map(({name,group})=>{
+    const h=allWeeks.reduce((acc,wk)=>{const emp=(wk.groups[group]||[]).find(e=>e.name===name);if(!emp)return acc;return acc+emp.shifts.reduce((a,s,i)=>{if(!dateInPP(wk.dates[i],mi,period))return a;if(!s||["VAC","OFF","CLOSED","CUSTOM"].includes(s.st))return a;return a+(s.st==="SICK"?(s.sh!==null?+s.sh:0):s.h);},0);},0);
+    const shifts=allWeeks.reduce((acc,wk)=>{const emp=(wk.groups[group]||[]).find(e=>e.name===name);if(!emp)return acc;return acc+emp.shifts.filter((s,i)=>dateInPP(wk.dates[i],mi,period)&&s&&!["VAC","OFF","CLOSED","CUSTOM"].includes(s.st)&&s.h>0).length;},0);
+    return{name,group,h,shifts};
+  });
+  const vacReqs=requests.filter(r=>r.type==="VACATION"&&r.status==="APPROVED");
+  const sickYTD=(name,group)=>allWeeks.reduce((acc,wk)=>{const emp=(wk.groups[group]||[]).find(e=>e.name===name);if(!emp)return acc;return acc+emp.shifts.filter(s=>s?.st==="SICK").length;},0);
+  const TABS=[{id:"hours",l:"📊 Hours"},{id:"vacation",l:"🌴 Vacation"},{id:"sick",l:"🤒 Sick Days"}];
+  return(
+    <div>
+      <div style={{display:"flex",gap:4,marginBottom:14,flexWrap:"wrap"}}>
+        {TABS.map(t=><button key={t.id} onClick={()=>setTab(t.id)} style={{padding:"6px 14px",borderRadius:7,border:`1px solid ${tab===t.id?"#3b82f6":"#e2e8f0"}`,background:tab===t.id?"#eff6ff":"none",color:tab===t.id?"#1d4ed8":"#64748b",fontSize:10,cursor:"pointer",fontWeight:tab===t.id?700:400}}>{t.l}</button>)}
+      </div>
+      {tab==="hours"&&(
+        <div>
+          <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:16,padding:"10px 14px",background:"#fff",border:"1px solid #e2e8f0",borderRadius:9,boxShadow:"0 1px 3px rgba(0,0,0,0.06)"}}>
+            <div style={{fontWeight:800,fontSize:13,color:"#1e293b",marginRight:4}}>STAFF HOURS</div>
+            <div style={{display:"flex",gap:2,flexWrap:"wrap"}}>{MON.map((m,i)=><button key={m} onClick={()=>setMi(i)} style={{padding:"3px 7px",borderRadius:5,border:`1px solid ${mi===i?"#3b82f6":"#e2e8f0"}`,background:mi===i?"#eff6ff":"none",color:mi===i?"#1d4ed8":"#64748b",fontSize:8,cursor:"pointer",fontWeight:mi===i?700:400}}>{m}</button>)}</div>
+            <div style={{display:"flex",gap:4}}>{[1,2].map(v=><button key={v} onClick={()=>setPeriod(v)} style={{padding:"4px 10px",borderRadius:6,border:`1px solid ${period===v?"#3b82f6":"#e2e8f0"}`,background:period===v?"#eff6ff":"none",color:period===v?"#1d4ed8":"#64748b",fontSize:8,cursor:"pointer",fontWeight:period===v?700:400,whiteSpace:"nowrap"}}>{ppLabel(mi,v)}</button>)}</div>
+          </div>
+          <div style={{background:"#fff",border:"1px solid #e2e8f0",borderRadius:8,overflow:"auto",boxShadow:"0 1px 3px rgba(0,0,0,0.06)"}}>
+            <table style={{width:"100%",borderCollapse:"separate",borderSpacing:0}}>
+              <thead><tr>{["EMPLOYEE","ROLE","HOURS","SHIFTS"].map(l=><th key={l} style={{padding:"8px 12px",textAlign:"left",fontSize:9,background:"#f8fafc",borderBottom:"2px solid #e2e8f0",color:"#64748b",fontWeight:700}}>{l}</th>)}</tr></thead>
+              <tbody>{rows.map((row,i)=>{const gc=C[row.group]||DEF[row.group];return(
+                <tr key={row.name+row.group} style={{background:i%2===0?"#fff":gc.gbg+"55"}}>
+                  <td style={{padding:"8px 12px",fontWeight:600,fontSize:12,color:"#1e293b",borderBottom:"1px solid #f1f5f9"}}><div style={{display:"flex",alignItems:"center",gap:6}}><div style={{width:6,height:6,borderRadius:"50%",background:gc.acc}}/>{row.name}</div></td>
+                  <td style={{padding:"8px 12px",borderBottom:"1px solid #f1f5f9"}}><span style={{fontSize:9,fontWeight:700,color:gc.htx,background:gc.cbg,border:`1px solid ${gc.cbo}`,borderRadius:20,padding:"2px 8px"}}>{row.group}</span></td>
+                  <td style={{padding:"8px 12px",fontSize:13,fontWeight:700,borderBottom:"1px solid #f1f5f9",color:row.h>0?"#1e293b":"#cbd5e1"}}>{row.h>0?`${row.h}h`:"—"}</td>
+                  <td style={{padding:"8px 12px",fontSize:10,color:"#64748b",borderBottom:"1px solid #f1f5f9"}}>{row.shifts>0?row.shifts:"—"}</td>
+                </tr>
+              );})}</tbody>
+            </table>
+          </div>
+        </div>
+      )}
+      {tab==="vacation"&&(
+        <div style={{background:"#fff",border:"1px solid #e2e8f0",borderRadius:8,overflow:"hidden",boxShadow:"0 1px 3px rgba(0,0,0,0.06)"}}>
+          {order.map((emp,i)=>{
+            const k=`${emp.name}||${emp.group}`;const reqs=vacReqs.filter(r=>r.empName===emp.name&&r.group===emp.group);
+            const totalVac=reqs.reduce((a,r)=>a+r.dates.length,0);const isExp=expanded.has(k);const gc=DEF[emp.group];
+            return(<div key={k} style={{borderBottom:"1px solid #f1f5f9"}}>
+              <div onClick={()=>reqs.length&&toggle(k)} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",background:i%2===0?"#fff":gc.gbg+"44",cursor:reqs.length?"pointer":"default"}}>
+                <div style={{width:7,height:7,borderRadius:"50%",background:gc.acc}}/>
+                <span style={{fontWeight:600,fontSize:12,color:"#1e293b",minWidth:110}}>{emp.name}</span>
+                <span style={{fontSize:9,padding:"2px 8px",borderRadius:20,background:gc.cbg,border:`1px solid ${gc.cbo}`,color:gc.htx,fontWeight:700}}>{emp.group}</span>
+                <div style={{marginLeft:"auto",display:"flex",gap:10,alignItems:"center"}}>
+                  <span style={{fontSize:10,fontWeight:700,color:totalVac>0?gc.acc:"#94a3b8"}}>🌴 {totalVac} VAC days</span>
+                  {reqs.length>0&&<span style={{fontSize:10,color:"#94a3b8"}}>{isExp?"▼":"▶"}</span>}
+                </div>
+              </div>
+              {isExp&&reqs.length>0&&<div style={{padding:"6px 14px 10px 36px",background:gc.gbg+"44"}}>
+                {reqs.map((req,ri)=>{const days=req.dates.length;const first=req.dates[0];const last2=req.dates[req.dates.length-1];return(
+                  <div key={req.id} style={{display:"flex",gap:10,padding:"5px 10px",marginBottom:3,background:"#fff",border:`1px solid ${gc.cbo}`,borderRadius:6,alignItems:"center"}}>
+                    <span style={{fontSize:9,color:"#64748b"}}>#{ri+1}</span>
+                    <span style={{fontSize:10,fontWeight:600,color:"#1e293b"}}>{days===1?first:`${first} – ${last2}`}</span>
+                    <span style={{padding:"2px 8px",borderRadius:20,background:PEND_CLR.bg,border:`1px solid ${PEND_CLR.bo}`,fontSize:9,color:PEND_CLR.tx,fontWeight:700}}>{days} day{days!==1?"s":""}</span>
+                  </div>
+                );})}
+              </div>}
+            </div>);
+          })}
+          {order.length===0&&<div style={{textAlign:"center",padding:40,color:"#94a3b8",fontSize:11}}>No staff data.</div>}
+        </div>
+      )}
+      {tab==="sick"&&(
+        <div style={{background:"#fff",border:"1px solid #e2e8f0",borderRadius:8,overflow:"hidden",boxShadow:"0 1px 3px rgba(0,0,0,0.06)"}}>
+          <table style={{width:"100%",borderCollapse:"separate",borderSpacing:0}}>
+            <thead><tr>{["EMPLOYEE","ROLE","SICK DAYS YTD"].map(l=><th key={l} style={{padding:"8px 12px",textAlign:"left",fontSize:9,background:"#f8fafc",borderBottom:"2px solid #e2e8f0",color:"#64748b",fontWeight:700}}>{l}</th>)}</tr></thead>
+            <tbody>{order.map((emp,i)=>{const gc=DEF[emp.group];const sick=sickYTD(emp.name,emp.group);return(
+              <tr key={emp.name+emp.group} style={{background:i%2===0?"#fff":gc.gbg+"55"}}>
+                <td style={{padding:"8px 12px",fontWeight:600,fontSize:12,color:"#1e293b",borderBottom:"1px solid #f1f5f9"}}><div style={{display:"flex",alignItems:"center",gap:6}}><div style={{width:6,height:6,borderRadius:"50%",background:gc.acc}}/>{emp.name}</div></td>
+                <td style={{padding:"8px 12px",borderBottom:"1px solid #f1f5f9"}}><span style={{fontSize:9,fontWeight:700,color:gc.htx,background:gc.cbg,border:`1px solid ${gc.cbo}`,borderRadius:20,padding:"2px 8px"}}>{emp.group}</span></td>
+                <td style={{padding:"8px 12px",fontSize:13,fontWeight:700,borderBottom:"1px solid #f1f5f9",color:sick>0?"#ef4444":"#94a3b8"}}>🤒 {sick>0?sick:"—"}</td>
+              </tr>
+            );})}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ══ MESSAGES PAGE ──────────────────────────────────────────────── */
+function MessagesPage({messages,setMessages,swapRequests,setSwapRequests,staffPins,isUnlocked,liveWeeks,setLiveWeeks,addAudit,currentUser,onApproveSwap,onDenySwap}){
+  const[msgTab,setMsgTab]=useState("messages");
+  const[pinModal,setPinModal]=useState(false);
+  const[authedName,setAuthedName]=useState("");const[authedGroup,setAuthedGroup]=useState("");
+  const[body,setBody]=useState("");const[sendMsg,setSendMsg]=useState("");
+  const validPins=staffPins.filter(s=>s.pin&&s.pin.length>=3);
+  const unreadMsgs=messages.filter(m=>!m.read&&!m.isSwap).length;
+  const pendingSwaps=swapRequests.filter(s=>s.status==="PENDING").length;
+  const markRead=id=>setMessages(prev=>prev.map(m=>m.id===id?{...m,read:true}:m));
+  const markAllRead=()=>setMessages(prev=>prev.map(m=>({...m,read:true})));
+  const deleteMsg=id=>setMessages(prev=>prev.filter(m=>m.id!==id));
+  const sendMessage=()=>{
+    if(!body.trim()){setSendMsg("Message cannot be empty.");return;}
+    const now=new Date();const ts=`${MON[now.getMonth()]} ${now.getDate()}, ${now.getFullYear()} ${now.getHours()}:${String(now.getMinutes()).padStart(2,"0")}`;
+    setMessages(prev=>[{id:uid(),from:authedName,group:authedGroup,body:body.trim(),ts,read:false,year:2026},...prev]);
+    addAudit&&addAudit(authedName,"Sent message to admin");
+    setBody("");setAuthedName("");setAuthedGroup("");setSendMsg("✓ Sent!");setTimeout(()=>setSendMsg(""),2500);
+  };
+  const approveSwap=onApproveSwap||((sid)=>{});
+  const denySwap=onDenySwap||((sid)=>{});
+  const years=[...new Set(messages.map(m=>m.year||2026))].sort((a,b)=>b-a);
+  const[selYear,setSelYear]=useState(2026);
+  return(
+    <div>
+      {pinModal&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:9990}}>
+        <div data-ov style={{background:"#fff",borderRadius:12,padding:24,width:290}}>
+          <div style={{fontWeight:700,fontSize:13,color:"#1e293b",marginBottom:12}}>💬 Send a Message</div>
+          <PinPad validPins={validPins.map(s=>s.pin)} onMatch={pin=>{const m=validPins.find(s=>s.pin===pin);if(m){setAuthedName(m.name);setAuthedGroup(m.group);setPinModal(false);}}} onCancel={()=>setPinModal(false)} subtitle="Enter your staff PIN"/>
+        </div>
+      </div>}
+      <div style={{display:"flex",gap:4,marginBottom:14}}>
+        <button onClick={()=>setMsgTab("messages")} style={{padding:"6px 14px",borderRadius:7,border:`1px solid ${msgTab==="messages"?"#3b82f6":"#e2e8f0"}`,background:msgTab==="messages"?"#eff6ff":"none",color:msgTab==="messages"?"#1d4ed8":"#64748b",fontSize:10,cursor:"pointer",fontWeight:msgTab==="messages"?700:400,position:"relative"}}>
+          💬 Messages{unreadMsgs>0&&<span style={{marginLeft:4,background:"#ef4444",color:"#fff",borderRadius:10,fontSize:7,padding:"1px 4px",fontWeight:700}}>{unreadMsgs}</span>}
+        </button>
+        <button onClick={()=>setMsgTab("swaps")} style={{padding:"6px 14px",borderRadius:7,border:`1px solid ${msgTab==="swaps"?"#7c3aed":"#e2e8f0"}`,background:msgTab==="swaps"?"#ede9fe":"none",color:msgTab==="swaps"?"#4c1d95":"#64748b",fontSize:10,cursor:"pointer",fontWeight:msgTab==="swaps"?700:400,position:"relative"}}>
+          🔄 Swap Requests{pendingSwaps>0&&<span style={{marginLeft:4,background:"#7c3aed",color:"#fff",borderRadius:10,fontSize:7,padding:"1px 4px",fontWeight:700}}>{pendingSwaps}</span>}
+        </button>
+      </div>
+      {msgTab==="messages"&&(
+        <div>
+          <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:16,padding:"10px 14px",background:"#fff",border:"1px solid #e2e8f0",borderRadius:9,boxShadow:"0 1px 3px rgba(0,0,0,0.06)",flexWrap:"wrap"}}>
+            <div style={{fontWeight:800,fontSize:13,color:"#1e293b"}}>💬 Staff Messages</div>
+            {unreadMsgs>0&&<span style={{padding:"2px 8px",borderRadius:20,background:"#ef4444",color:"#fff",fontSize:9,fontWeight:700}}>{unreadMsgs} new</span>}
+            <div style={{marginLeft:"auto",display:"flex",gap:6}}>
+              {!authedName&&<Btn onClick={()=>setPinModal(true)} variant="primary" style={{fontSize:10}}>💬 Send a Message</Btn>}
+              {isUnlocked&&unreadMsgs>0&&<Btn onClick={markAllRead} style={{fontSize:9}}>✓ Mark All Read</Btn>}
+            </div>
+          </div>
+          {authedName&&(
+            <div style={{background:"#fff",border:"2px solid #3b82f6",borderRadius:9,padding:16,marginBottom:16}}>
+              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+                <div style={{width:8,height:8,borderRadius:"50%",background:(DEF[authedGroup]||DEF.Tech).acc}}/>
+                <span style={{fontWeight:700,fontSize:12,color:"#1e293b"}}>{authedName}</span>
+                <span style={{fontSize:9,padding:"2px 7px",borderRadius:20,background:(DEF[authedGroup]||DEF.Tech).cbg,border:`1px solid ${(DEF[authedGroup]||DEF.Tech).cbo}`,color:(DEF[authedGroup]||DEF.Tech).htx,fontWeight:700}}>{authedGroup}</span>
+                <button onClick={()=>{setAuthedName("");setAuthedGroup("");setBody("");}} style={{marginLeft:"auto",padding:"2px 8px",borderRadius:5,border:"1px solid #e2e8f0",background:"none",color:"#94a3b8",fontSize:9,cursor:"pointer"}}>✕</button>
+              </div>
+              <textarea value={body} onChange={e=>setBody(e.target.value)} placeholder="Type your message here..." rows={4} style={{width:"100%",background:"#f8fafc",border:"1px solid #e2e8f0",borderRadius:7,padding:"9px 12px",color:"#1e293b",fontSize:11,outline:"none",resize:"vertical",boxSizing:"border-box"}}/>
+              <div style={{display:"flex",alignItems:"center",gap:8,marginTop:8}}>
+                <Btn onClick={sendMessage} variant="primary" style={{fontSize:11}}>📤 Send</Btn>
+                {sendMsg&&<span style={{fontSize:9,color:sendMsg.startsWith("✓")?"#15803d":"#dc2626",fontWeight:600}}>{sendMsg}</span>}
+              </div>
+            </div>
+          )}
+          {isUnlocked?(
+            <div>
+              <div style={{display:"flex",gap:6,marginBottom:12,flexWrap:"wrap"}}>{years.map(y=><button key={y} onClick={()=>setSelYear(y)} style={{padding:"5px 14px",borderRadius:7,border:`1px solid ${selYear===y?"#3b82f6":"#e2e8f0"}`,background:selYear===y?"#eff6ff":"#fff",color:selYear===y?"#1d4ed8":"#64748b",fontSize:9,cursor:"pointer",fontWeight:selYear===y?700:400}}>{y}</button>)}</div>
+              {messages.filter(m=>(m.year||2026)===selYear).length===0?<div style={{textAlign:"center",padding:40,color:"#94a3b8",fontSize:11,background:"#fff",border:"1px solid #e2e8f0",borderRadius:9}}>No messages yet.</div>:(
+                <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                  {messages.filter(m=>(m.year||2026)===selYear).map(m=>{const gc=DEF[m.group]||DEF.Tech;return(
+                    <div key={m.id} style={{background:"#fff",border:`1px solid ${m.read?"#e2e8f0":"#3b82f6"}`,borderRadius:9,padding:14,boxShadow:m.read?"none":"0 0 0 2px #bfdbfe",position:"relative"}}>
+                      {!m.read&&<div style={{position:"absolute",top:10,right:12,width:8,height:8,borderRadius:"50%",background:"#ef4444"}}/>}
+                      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+                        <div style={{width:7,height:7,borderRadius:"50%",background:gc.acc}}/>
+                        <span style={{fontWeight:700,fontSize:12,color:"#1e293b"}}>{m.from}</span>
+                        <span style={{fontSize:9,padding:"2px 7px",borderRadius:20,background:gc.cbg,border:`1px solid ${gc.cbo}`,color:gc.htx,fontWeight:700}}>{m.group}</span>
+                        <span style={{fontSize:8,color:"#94a3b8",marginLeft:"auto"}}>{m.ts}</span>
+                      </div>
+                      <div style={{fontSize:11,color:"#1e293b",lineHeight:1.5,whiteSpace:"pre-wrap",marginBottom:8}}>{m.body}</div>
+                      <div style={{display:"flex",gap:6}}>
+                        {!m.read&&<Btn onClick={()=>markRead(m.id)} variant="success" style={{fontSize:8,padding:"2px 8px"}}>✓ Mark Read</Btn>}
+                        <Btn onClick={()=>deleteMsg(m.id)} variant="danger" style={{fontSize:8,padding:"2px 8px"}}>🗑 Delete</Btn>
+                      </div>
+                    </div>
+                  );})}
+                </div>
+              )}
+            </div>
+          ):(
+            <div style={{textAlign:"center",padding:60,color:"#94a3b8",fontSize:11,background:"#fff",border:"1px solid #e2e8f0",borderRadius:9}}>
+              <div style={{fontSize:28,marginBottom:8}}>🔒</div><div style={{fontWeight:600}}>Messages are admin-only to read.</div>
+            </div>
+          )}
+        </div>
+      )}
+      {msgTab==="swaps"&&(
+        <div>
+          <div style={{padding:"10px 14px",background:"#fff",border:"1px solid #e2e8f0",borderRadius:9,marginBottom:14,boxShadow:"0 1px 3px rgba(0,0,0,0.06)"}}>
+            <div style={{fontWeight:800,fontSize:13,color:"#1e293b",marginBottom:4}}>🔄 Shift Swap Requests</div>
+            <div style={{fontSize:9,color:"#94a3b8"}}>Pending swaps also show on the schedule cells. Approve or decline here or directly on the schedule.</div>
+          </div>
+          {swapRequests.length===0?<div style={{textAlign:"center",padding:40,color:"#94a3b8",fontSize:11,background:"#fff",border:"1px solid #e2e8f0",borderRadius:9}}>No swap requests yet.</div>:(
+            <div style={{display:"flex",flexDirection:"column",gap:8}}>
+              {swapRequests.map(s=>{
+                const gcR=DEF[s.requesterGroup]||DEF.Tech;const gcT=DEF[s.targetGroup]||DEF.Tech;
+                const isPending=s.status==="PENDING";
+                return(
+                  <div key={s.id} style={{background:"#fff",border:`1px solid ${isPending?SWAP_CLR.bo:"#e2e8f0"}`,borderRadius:9,padding:14,boxShadow:isPending?"0 0 0 2px #ede9fe":"none"}}>
+                    <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:8,flexWrap:"wrap"}}>
+                      <span style={{fontSize:8,padding:"2px 7px",borderRadius:20,background:isPending?SWAP_CLR.bg:s.status==="APPROVED"?"#dcfce7":"#fee2e2",color:isPending?SWAP_CLR.tx:s.status==="APPROVED"?"#15803d":"#991b1b",fontWeight:700}}>{s.status}</span>
+                      <span style={{fontSize:8,color:"#94a3b8"}}>{s.ts}</span>
+                      {s.approvedTs&&<span style={{fontSize:8,color:"#94a3b8"}}>· resolved {s.approvedTs}</span>}
+                    </div>
+                    <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8,flexWrap:"wrap"}}>
+                      <div style={{display:"flex",alignItems:"center",gap:5,padding:"6px 10px",background:gcR.cbg,border:`1px solid ${gcR.cbo}`,borderRadius:7}}>
+                        <div style={{width:6,height:6,borderRadius:"50%",background:gcR.acc}}/>
+                        <span style={{fontWeight:700,fontSize:11,color:"#1e293b"}}>{s.requesterName}</span>
+                        <span style={{fontSize:9,color:gcR.htx}}>{s.requesterShift?.t||"—"}</span>
+                      </div>
+                      <span style={{fontSize:14,color:"#7c3aed",fontWeight:700}}>⇄</span>
+                      <div style={{display:"flex",alignItems:"center",gap:5,padding:"6px 10px",background:gcT.cbg,border:`1px solid ${gcT.cbo}`,borderRadius:7}}>
+                        <div style={{width:6,height:6,borderRadius:"50%",background:gcT.acc}}/>
+                        <span style={{fontWeight:700,fontSize:11,color:"#1e293b"}}>{s.targetName}</span>
+                        <span style={{fontSize:9,color:gcT.htx}}>{s.targetShift?.t||"—"}</span>
+                      </div>
+                      <span style={{fontSize:9,color:"#64748b"}}>on {s.date}</span>
+                    </div>
+                    {s.note&&<div style={{fontSize:9,color:"#475569",background:"#f8fafc",border:"1px solid #e2e8f0",borderRadius:5,padding:"5px 8px",marginBottom:8}}>"{s.note}"</div>}
+                    {isPending&&isUnlocked&&<div style={{display:"flex",gap:6}}>
+                      <Btn onClick={()=>approveSwap(s.id)} variant="success" style={{fontSize:9}}>✓ Approve Swap</Btn>
+                      <Btn onClick={()=>denySwap(s.id)} variant="danger" style={{fontSize:9}}>✕ Deny</Btn>
+                    </div>}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ══ AUDIT LOG PAGE ─────────────────────────────────────────────── */
+function AuditPage({auditLog,masterWeeks,masterArchived,deletedEmps}){
+  const[selEmp,setSelEmp]=useState(null);
+  const allWeeks=[...(masterWeeks||[]),...(masterArchived||[])];
+  const liveOrder=getOrder(allWeeks);
+  const liveKeys=new Set(liveOrder.map(e=>`${e.name}||${e.group}`));
+  const auditActors=[...new Set(auditLog.map(e=>e.actor))];
+  const deletedFromAudit=auditActors.filter(n=>!liveOrder.some(e=>e.name===n)&&n!=="Admin").map(n=>({name:n,group:"—",deleted:true}));
+  const extraDeleted=(deletedEmps||[]).filter(d=>!liveKeys.has(`${d.name}||${d.group}`)&&!deletedFromAudit.some(x=>x.name===d.name));
+  const employees=[...liveOrder,...deletedFromAudit,...extraDeleted];
+  const empLog=selEmp?auditLog.filter(e=>e.actor===selEmp):[];
+  return(
+    <div>
+      <div style={{padding:"10px 14px",background:"#fff",border:"1px solid #e2e8f0",borderRadius:9,marginBottom:14,boxShadow:"0 1px 3px rgba(0,0,0,0.06)"}}>
+        <div style={{fontWeight:800,fontSize:13,color:"#1e293b",marginBottom:4}}>🗓 Audit Log</div>
+        <div style={{fontSize:9,color:"#94a3b8"}}>Login events and staff actions. Deleted employees appear at the bottom.</div>
+      </div>
+      <div style={{display:"flex",gap:14,alignItems:"flex-start"}}>
+        <div style={{width:180,flexShrink:0,background:"#fff",border:"1px solid #e2e8f0",borderRadius:9,overflow:"hidden",boxShadow:"0 1px 3px rgba(0,0,0,0.06)"}}>
+          <div style={{padding:"8px 12px",background:"#f8fafc",borderBottom:"1px solid #e2e8f0",fontSize:9,fontWeight:700,color:"#64748b"}}>EMPLOYEES</div>
+          {employees.length===0&&<div style={{padding:16,fontSize:9,color:"#94a3b8"}}>No data yet.</div>}
+          {employees.map((emp,idx)=>{
+            const name=typeof emp==="string"?emp:emp.name;
+            const gc=emp.group&&DEF[emp.group]?DEF[emp.group]:DEF.Tech;
+            const count=auditLog.filter(a=>a.actor===name).length;
+            const lastLogin=auditLog.filter(a=>a.actor===name&&a.type==="login").slice(-1)[0];
+            const isDeleted=emp.deleted;
+            return(
+              <div key={`${name}-${idx}`} onClick={()=>setSelEmp(selEmp===name?null:name)} style={{padding:"9px 12px",borderBottom:"1px solid #f1f5f9",cursor:"pointer",background:selEmp===name?"#eff6ff":"none"}} onMouseEnter={ev=>ev.currentTarget.style.background=selEmp===name?"#eff6ff":"#f8fafc"} onMouseLeave={ev=>ev.currentTarget.style.background=selEmp===name?"#eff6ff":"none"}>
+                <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:1}}>
+                  {emp.group&&emp.group!=="—"&&<div style={{width:5,height:5,borderRadius:"50%",background:gc.acc,flexShrink:0}}/>}
+                  <div style={{fontWeight:600,fontSize:11,color:isDeleted?"#94a3b8":"#1e293b"}}>{name}{isDeleted?" ✕":""}</div>
+                </div>
+                {emp.group&&emp.group!=="—"&&<div style={{fontSize:7,color:gc.htx,marginBottom:1}}>{emp.group}</div>}
+                <div style={{fontSize:8,color:"#94a3b8"}}>{count} event{count!==1?"s":""}</div>
+                {lastLogin&&<div style={{fontSize:7,color:"#64748b"}}>Last: {lastLogin.ts}</div>}
+              </div>
+            );
+          })}
+        </div>
+        <div style={{flex:1}}>
+          {!selEmp?<div style={{padding:40,textAlign:"center",color:"#94a3b8",fontSize:11,background:"#fff",border:"1px solid #e2e8f0",borderRadius:9}}>Select an employee to view their audit trail.</div>:(
+            <div style={{background:"#fff",border:"1px solid #e2e8f0",borderRadius:9,overflow:"hidden",boxShadow:"0 1px 3px rgba(0,0,0,0.06)"}}>
+              <div style={{padding:"8px 14px",background:"#f8fafc",borderBottom:"1px solid #e2e8f0",display:"flex",alignItems:"center",gap:8}}>
+                <span style={{fontWeight:700,fontSize:12,color:"#1e293b"}}>{selEmp}</span>
+                <span style={{fontSize:8,color:"#94a3b8"}}>{empLog.length} events</span>
+              </div>
+              {empLog.length===0?<div style={{padding:20,fontSize:9,color:"#94a3b8"}}>No events yet.</div>:(
+                <div style={{maxHeight:500,overflowY:"auto"}}>
+                  {empLog.slice().reverse().map((entry,i)=>(
+                    <div key={i} style={{display:"flex",gap:12,padding:"9px 14px",borderBottom:"1px solid #f1f5f9",alignItems:"flex-start"}}>
+                      <div style={{width:8,height:8,borderRadius:"50%",background:entry.type==="login"?"#3b82f6":entry.type==="action"?"#16a34a":"#94a3b8",flexShrink:0,marginTop:3}}/>
+                      <div style={{flex:1}}>
+                        <div style={{fontSize:10,fontWeight:600,color:"#1e293b"}}>{entry.description}</div>
+                        <div style={{fontSize:8,color:"#94a3b8",marginTop:2}}>{entry.ts}</div>
+                        {entry.context&&<div style={{fontSize:8,color:"#64748b",marginTop:2}}>{entry.context}</div>}
+                      </div>
+                      <span style={{fontSize:7,padding:"1px 6px",borderRadius:10,background:entry.type==="login"?"#eff6ff":entry.type==="action"?"#f0fdf4":"#f8fafc",color:entry.type==="login"?"#1d4ed8":entry.type==="action"?"#15803d":"#64748b",fontWeight:700,flexShrink:0}}>{entry.type}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ══ BACKFILL PAGE ───────────────────────────────────────────────── */
+function BackfillPage({liveWeeks,setLiveWeeks,liveArchived,setLiveArchived,masterWeeks,setMasterWeeks,masterArchived,setMasterArchived,C}){
+  const allWeeks=useMemo(()=>[...liveWeeks,...liveArchived,...masterWeeks,...masterArchived],[liveWeeks,liveArchived,masterWeeks,masterArchived]);
+  const[backfillData,setBackfillData]=useState({});
+  const[committed,setCommitted]=useState(false);
+  const[msg,setMsg]=useState("");
+  const today=new Date();
+  const backfillWeeks=useMemo(()=>{
+    const seen=new Set();const out=[];
+    [...sortWeeks(masterWeeks),...sortWeeks(masterArchived)].forEach(w=>{
+      if(seen.has(w.id))return;seen.add(w.id);
+      const wEnd=w.dates.filter(Boolean).slice(-1)[0];if(!wEnd)return;
+      const[d,m]=wEnd.split("-");const wDate=new Date(2026,MON.indexOf(m),+d);
+      if(wDate<today)out.push(w);
+    });
+    return out;
+  },[masterWeeks,masterArchived]);
+
+  const setCell=(weekId,empKey,di,val)=>{
+    setBackfillData(prev=>{
+      const wk={...(prev[weekId]||{})};const emp={...(wk[empKey]||{})};
+      if(val===null){delete emp[di];}else{emp[di]=val;}
+      wk[empKey]=emp;return{...prev,[weekId]:wk};
+    });
+    setCommitted(false);
+  };
+
+  const applyBackfill=()=>{
+    const entries=[];
+    Object.entries(backfillData).forEach(([weekId,empMap])=>{
+      Object.entries(empMap).forEach(([empKey,dayMap])=>{
+        Object.entries(dayMap).forEach(([di,val])=>{
+          const[name,group]=empKey.split("||");
+          entries.push({weekId,name,group,di:+di,st:val.st});
+        });
+      });
+    });
+    if(!entries.length){setMsg("No entries to apply.");return;}
+    const applyToPool=(pool,setter)=>setter(pool.map(week=>{
+      const weekEntries=entries.filter(e=>e.weekId===week.id);if(!weekEntries.length)return week;
+      const w={...week,groups:{...week.groups}};
+      GROUPS.forEach(g=>{w.groups[g]=(w.groups[g]||[]).map(emp=>{
+        const empEntries=weekEntries.filter(e=>e.name===emp.name&&e.group===g);if(!empEntries.length)return emp;
+        const shifts=[...emp.shifts];
+        empEntries.forEach(entry=>{shifts[entry.di]={...shifts[entry.di],st:entry.st,sh:entry.st==="SICK"?8:null};});
+        return{...emp,shifts};
+      });});return w;
+    }));
+    applyToPool(liveWeeks,setLiveWeeks);applyToPool(liveArchived,setLiveArchived);
+    applyToPool(masterWeeks,setMasterWeeks);applyToPool(masterArchived,setMasterArchived);
+    setCommitted(true);setMsg(`✓ Applied ${entries.length} backfill entries.`);
+  };
+
+  if(!backfillWeeks.length)return <div style={{padding:24,fontSize:10,color:"#94a3b8"}}>No past weeks available for backfill.</div>;
+
+  return(
+    <div>
+      <div style={{padding:"10px 14px",background:"#fff",border:"1px solid #e2e8f0",borderRadius:9,marginBottom:16,boxShadow:"0 1px 3px rgba(0,0,0,0.06)"}}>
+        <div style={{fontWeight:800,fontSize:13,color:"#1e293b",marginBottom:4}}>🤒 Historical Backfill</div>
+        <div style={{fontSize:9,color:"#94a3b8",marginBottom:8}}>Click any cell to toggle Sick / Vacation. Each entry is a full day. Press Apply when done.</div>
+        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          <Btn onClick={applyBackfill} variant={committed?"default":"success"} disabled={committed} style={{fontSize:10}}>✅ Apply All to Archive & Stats</Btn>
+          {msg&&<span style={{fontSize:9,color:msg.startsWith("✓")?"#15803d":"#dc2626",fontWeight:600}}>{msg}</span>}
+        </div>
+      </div>
+      <DualScroll showTop>
+        <div style={{display:"flex",flexDirection:"column",gap:16}}>
+        {backfillWeeks.map(week=>(
+          <div key={week.id} style={{background:"#fff",border:"1px solid #e2e8f0",borderRadius:9,padding:14,boxShadow:"0 1px 3px rgba(0,0,0,0.06)"}}>
+            <div style={{fontWeight:700,fontSize:12,color:"#1e293b",marginBottom:10}}>{week.label}</div>
+            <div style={{display:"flex",paddingLeft:118,marginBottom:4}}>{DAYS.map((d,i)=><div key={d} style={{flex:1,minWidth:80,textAlign:"center"}}><div style={{fontSize:10,fontWeight:700,color:"#475569"}}>{d}</div><div style={{fontSize:7,color:"#94a3b8"}}>{week.dates?.[i]||""}</div></div>)}</div>
+            {GROUPS.map(grp=>{const gc=C[grp]||DEF[grp];return(
+              <div key={grp} style={{marginBottom:10}}>
+                <div style={{fontSize:9,fontWeight:700,color:gc.htx,padding:"3px 8px",background:gc.gbg,borderRadius:5,marginBottom:4,borderLeft:`2px solid ${gc.acc}`}}>{grp}</div>
+                {(week.groups[grp]||[]).map(emp=>{
+                  const empKey=`${emp.name}||${grp}`;const empData=backfillData[week.id]?.[empKey]||{};
+                  return(
+                    <div key={emp.id} style={{display:"flex",alignItems:"center",marginBottom:2}}>
+                      <div style={{width:118,flexShrink:0,padding:"2px 8px",fontWeight:600,fontSize:10,color:"#1e293b"}}>{emp.name}</div>
+                      {emp.shifts.map((s,di)=>{
+                        if(di===6)return <div key={di} style={{flex:1,minWidth:80,padding:"2px"}}><div style={{background:"#9ca3af",borderRadius:4,minHeight:34,opacity:0.25}}/></div>;
+                        const override=empData[di];
+                        const baseSt=s?.st;
+                        const displaySt=override?override.st:baseSt;
+                        return(
+                          <div key={di} style={{flex:1,minWidth:80,padding:"2px"}}>
+                            <div style={{background:displaySt==="SICK"?"#fee2e2":displaySt==="VAC"?"#fef3c7":"#f8fafc",border:`1px solid ${displaySt==="SICK"?"#f87171":displaySt==="VAC"?"#f59e0b":"#e2e8f0"}`,borderRadius:4,minHeight:34,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",cursor:"pointer",fontSize:9,color:displaySt==="SICK"?"#991b1b":displaySt==="VAC"?"#78350f":"#94a3b8",fontWeight:600}}
+                              onClick={()=>{
+                                if(displaySt==="SICK"){setCell(week.id,empKey,di,{st:"VAC"});}
+                                else if(displaySt==="VAC"){setCell(week.id,empKey,di,null);}
+                                else{setCell(week.id,empKey,di,{st:"SICK"});}
+                              }}>
+                              {displaySt==="SICK"&&"🤒 Sick"}
+                              {displaySt==="VAC"&&"🌴 VAC"}
+                              {!displaySt&&s?.t&&<span style={{fontSize:8,color:"#94a3b8"}}>{s.t}</span>}
+                              {!displaySt&&!s?.t&&<span style={{fontSize:7,color:"#d1d5db"}}>—</span>}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })}
+              </div>
+            );})}
+          </div>
+        ))}
+        </div>
+      </DualScroll>
+    </div>
+  );
+}
+
+
+/* ══ CLEAR DATA MODAL ───────────────────────────────────────────── */
+function ClearDataModal({masterWeeks,liveWeeks,pwd,pwd2,onConfirm,onClose}){
+  const[step,setStep]=useState("date"); // "date" -> "confirm"
+  const[startInput,setStartInput]=useState("");
+  const[clearInput,setClearInput]=useState("");
+  const[clearErr,setClearErr]=useState(false);
+  // Get the last published employee list from liveWeeks or most recent masterWeek
+  const lastPublished=liveWeeks.length?liveWeeks[liveWeeks.length-1]:masterWeeks[masterWeeks.length-1];
+  const parseInputDate=s=>{
+    if(!s)return null;
+    const parts=s.split("/");if(parts.length<2)return null;
+    const d=parseInt(parts[0]),m=parseInt(parts[1])-1;
+    if(isNaN(d)||isNaN(m))return null;
+    return new Date(2026,m,d);
+  };
+  const inputDate=parseInputDate(startInput);
+  const isValidDate=inputDate&&!isNaN(inputDate.getTime());
+  return(
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.6)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:9998}}>
+      <div data-ov style={{background:"#fff",borderRadius:14,padding:24,width:360,boxShadow:"0 24px 64px rgba(0,0,0,0.3)"}}>
+        {step==="date"?(
+          <div>
+            <div style={{fontWeight:800,fontSize:14,color:"#dc2626",marginBottom:4}}>🗑 Clear Schedule Data</div>
+            <div style={{fontSize:10,color:"#64748b",marginBottom:16}}>All shift data, requests, messages, and history will be cleared. Staff names and settings are preserved. Enter the new schedule start date to generate 5 fresh weeks.</div>
+            <div style={{fontSize:11,fontWeight:600,color:"#475569",marginBottom:6}}>New Start Date (DD/MM)</div>
+            <input autoFocus value={startInput} onChange={e=>setStartInput(e.target.value)} placeholder="e.g. 28/04" style={{width:"100%",background:"#f8fafc",border:`1px solid ${isValidDate?"#86efac":startInput?"#f87171":"#e2e8f0"}`,borderRadius:8,padding:"10px 12px",color:"#1e293b",fontSize:14,outline:"none",boxSizing:"border-box",marginBottom:4,letterSpacing:2}}/>
+            <div style={{fontSize:9,color:"#94a3b8",marginBottom:16}}>
+              {isValidDate?`✓ Will start week containing ${inputDate.getDate()}-${["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][inputDate.getMonth()]}`:startInput?"Invalid date — use DD/MM format":""}
+            </div>
+            <div style={{fontSize:9,color:"#475569",marginBottom:16,padding:"8px 12px",background:"#f8fafc",borderRadius:7,border:"1px solid #e2e8f0"}}>
+              Staff from last published schedule will be carried forward: <strong>{lastPublished?GROUPS.flatMap(g=>(lastPublished.groups[g]||[]).map(e=>e.name)).join(", "):"none"}</strong>
+            </div>
+            <div style={{display:"flex",gap:8}}>
+              <Btn onClick={()=>setStep("confirm")} variant="danger" style={{flex:1,fontSize:11}} disabled={!isValidDate}>Next →</Btn>
+              <Btn onClick={onClose} style={{padding:"8px 14px",fontSize:11}}>Cancel</Btn>
+            </div>
+          </div>
+        ):(
+          <div>
+            <div style={{fontWeight:800,fontSize:14,color:"#dc2626",marginBottom:8}}>⚠️ Confirm Clear</div>
+            <div style={{fontSize:10,color:"#64748b",marginBottom:14}}>Type your admin password to confirm. This cannot be undone.</div>
+            <input autoFocus type="password" value={clearInput} onChange={e=>{setClearInput(e.target.value);setClearErr(false);}} onKeyDown={e=>e.key==="Enter"&&(clearInput===pwd||clearInput===pwd2)?onConfirm(inputDate):null} placeholder="Admin password" style={{width:"100%",background:"#fff",border:`1px solid ${clearErr?"#ef4444":"#f87171"}`,borderRadius:7,padding:"9px 12px",color:"#1e293b",fontSize:12,outline:"none",boxSizing:"border-box",marginBottom:6}}/>
+            {clearErr&&<div style={{fontSize:9,color:"#ef4444",marginBottom:8,fontWeight:600}}>Incorrect password.</div>}
+            <div style={{display:"flex",gap:8,marginTop:8}}>
+              <Btn onClick={()=>{if(clearInput===pwd||clearInput===pwd2){onConfirm(inputDate);}else setClearErr(true);}} variant="danger" style={{flex:1,fontSize:11}}>CONFIRM DELETE</Btn>
+              <Btn onClick={()=>{setStep("date");setClearInput("");setClearErr(false);}} style={{padding:"8px 14px",fontSize:11}}>← Back</Btn>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ══ ADMIN PAGE ──────────────────────────────────────────────────── */
+function AdminPage({C,setC,pwd,setPwd,pwd2,setPwd2,adminName1,setAdminName1,adminName2,setAdminName2,adminPin1,setAdminPin1,adminPin2,setAdminPin2,staffPins,setStaffPins,viewerPins,setViewerPins,lockMs,setLockMs,auditLog,liveWeeks,masterWeeks,liveArchived,masterArchived,requests,messages,swapRequests,onClearAll,pwd_for_clear,deletedEmps,customDayLabels,setCustomDayLabels,setLiveWeeks,setLiveArchived,setMasterWeeks,setMasterArchived}){
+  const[adminTab,setAdminTab]=useState("settings");
+  const[np,setNp]=useState("");const[cp,setCp]=useState("");const[msg,setMsg]=useState("");
+  const[np2,setNp2]=useState("");const[cp2,setCp2]=useState("");const[msg2,setMsg2]=useState("");
+  const[pinSection,setPinSection]=useState(false);const[editingPin,setEditingPin]=useState(null);
+  const[pinInput,setPinInput]=useState("");const[revealPin,setRevealPin]=useState(null);const[pinMsg,setPinMsg]=useState("");
+  const[newViewerName,setNewViewerName]=useState("");const[newViewerPin,setNewViewerPin]=useState("");const[viewerMsg,setViewerMsg]=useState("");
+  const[clearConfirm1,setClearConfirm1]=useState(false);const[clearInput,setClearInput]=useState("");const[clearErr,setClearErr]=useState(false);
+  const[archiveMsg,setArchiveMsg]=useState("");
+  const[customLabelInput,setCustomLabelInput]=useState(customDayLabels?.[0]||"Custom");
+
+  const CR=({label,ckey,fields})=>(<div style={{display:"flex",alignItems:"center",gap:10,padding:"8px 12px",background:"#f8fafc",borderRadius:7,marginBottom:6,flexWrap:"wrap"}}>
+    <div style={{width:130,fontSize:11,color:"#475569",fontWeight:600}}>{label}</div>
+    {fields.map(f=><div key={f} style={{display:"flex",alignItems:"center",gap:4}}><span style={{fontSize:8,color:"#94a3b8",textTransform:"uppercase"}}>{f}</span><input type="color" value={(C[ckey]&&C[ckey][f])||"#ffffff"} onChange={e=>setC(prev=>({...prev,[ckey]:{...prev[ckey],[f]:e.target.value}}))} style={{width:28,height:22,cursor:"pointer",border:"1px solid #e2e8f0",borderRadius:3,padding:0}}/></div>)}
+    <div style={{padding:"3px 10px",background:C[ckey]?.bg||C[ckey]?.cbg||"#f8fafc",border:`1px solid ${C[ckey]?.bo||C[ckey]?.cbo||"#e2e8f0"}`,borderRadius:5,fontSize:9,color:C[ckey]?.tx||C[ckey]?.ctx||"#1e293b"}}>Preview</div>
+    <Btn onClick={()=>setC(prev=>({...prev,[ckey]:DEF[ckey]}))} style={{fontSize:8,color:"#94a3b8"}}>Reset</Btn>
+  </div>);
+
+  const setPin=(name,group,val,onDup)=>setStaffPins(prev=>{
+    if(val&&prev.some(s=>(s.name!==name||s.group!==group)&&s.pin===val)){if(onDup)onDup();return prev;}
+    return prev.map(s=>s.name===name&&s.group===group?{...s,pin:val}:s);
+  });
+  const grouped=GROUPS.map(g=>({group:g,staff:staffPins.filter(s=>s.group===g)}));
+  const addViewer=()=>{if(!newViewerName.trim()||newViewerPin.length<3){setViewerMsg("Name and 3–4 digit PIN required.");return;}if(viewerPins.some(v=>v.name===newViewerName.trim())){setViewerMsg("Name already exists.");return;}setViewerPins(prev=>[...prev,{id:uid(),name:newViewerName.trim(),pin:newViewerPin}]);setNewViewerName("");setNewViewerPin("");setViewerMsg("✓ Added!");setTimeout(()=>setViewerMsg(""),2000);};
+
+  const doArchiveSnapshot=()=>{
+    try{
+      const data={liveWeeks,masterWeeks,liveArchived,masterArchived,requests,messages,swapRequests,exportedAt:nowTs()};
+      const snap=JSON.stringify(data,null,2);
+      const blob=new Blob([`<!DOCTYPE html><html><head><meta charset="utf-8"><title>HPVH Snapshot ${nowTs()}</title></head><body><pre style="font-family:monospace;font-size:10px;background:#1e293b;color:#94a3b8;padding:20px;white-space:pre-wrap">${snap.replace(/</g,"&lt;")}</pre><p style="font-family:sans-serif;font-size:11px;color:#64748b">Read-only snapshot exported from HPVH Schedule on ${nowTs()}.</p></body></html>`],{type:"text/html"});
+      const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=`hpvh-snapshot-${new Date().toISOString().slice(0,10)}.html`;a.click();
+      setArchiveMsg("✓ Snapshot downloaded.");setTimeout(()=>setArchiveMsg(""),3000);
+    }catch(e){setArchiveMsg("Error creating snapshot.");}
+  };
+
+  const doExportJson=()=>{
+    try{
+      const data={liveWeeks,masterWeeks,liveArchived,masterArchived,requests,messages,swapRequests,auditLog,exportedAt:nowTs()};
+      const blob=new Blob([JSON.stringify(data,null,2)],{type:"application/json"});
+      const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=`hpvh-export-${new Date().toISOString().slice(0,10)}.json`;a.click();
+      setArchiveMsg("✓ JSON export downloaded. Paste into seedScheduleData() in GAS to migrate.");setTimeout(()=>setArchiveMsg(""),5000);
+    }catch(e){setArchiveMsg("Error creating export.");}
+  };
+
+  const TABS=[{id:"settings",l:"⚙️ Settings"},{id:"pins",l:"🔑 PINs"},{id:"colours",l:"🎨 Colours"},{id:"passwords",l:"🔐 Passwords"},{id:"data",l:"💾 Data"},{id:"audit",l:"📋 Audit"},{id:"backfill",l:"🤒 Backfill"}];
+
+  return(
+    <div>
+      <div style={{fontWeight:800,fontSize:14,color:"#1e293b",marginBottom:12}}>⚙️ Admin</div>
+      <div style={{display:"flex",gap:4,marginBottom:16,flexWrap:"wrap"}}>
+        {TABS.map(t=><button key={t.id} onClick={()=>setAdminTab(t.id)} style={{padding:"6px 12px",borderRadius:7,border:`1px solid ${adminTab===t.id?"#3b82f6":"#e2e8f0"}`,background:adminTab===t.id?"#eff6ff":"#fff",color:adminTab===t.id?"#1d4ed8":"#64748b",fontSize:10,cursor:"pointer",fontWeight:adminTab===t.id?700:400}}>{t.l}</button>)}
+      </div>
+
+      {adminTab==="settings"&&(
+        <div>
+          <div style={{background:"#fff",border:"1px solid #e2e8f0",borderRadius:9,padding:16,marginBottom:12,boxShadow:"0 1px 3px rgba(0,0,0,0.06)"}}>
+            <div style={{fontWeight:700,fontSize:12,color:"#475569",marginBottom:10,paddingBottom:8,borderBottom:"1px solid #f1f5f9"}}>⏱ Auto-Lock Timeout</div>
+            <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>{LOCK_OPTIONS.map(opt=><button key={opt.ms} onClick={()=>setLockMs(opt.ms)} style={{padding:"7px 14px",borderRadius:7,border:`1px solid ${lockMs===opt.ms?"#3b82f6":"#e2e8f0"}`,background:lockMs===opt.ms?"#eff6ff":"#f8fafc",color:lockMs===opt.ms?"#1d4ed8":"#475569",fontSize:10,cursor:"pointer",fontWeight:lockMs===opt.ms?700:400}}>{opt.label}</button>)}</div>
+            <div style={{marginTop:8,fontSize:9,color:"#94a3b8"}}>Current: <strong>{LOCK_OPTIONS.find(o=>o.ms===lockMs)?.label||"5 min"}</strong></div>
+          </div>
+          <div style={{background:"#fff",border:"1px solid #e2e8f0",borderRadius:9,padding:16,boxShadow:"0 1px 3px rgba(0,0,0,0.06)"}}>
+            <div style={{fontWeight:700,fontSize:12,color:"#475569",marginBottom:8,paddingBottom:8,borderBottom:"1px solid #f1f5f9"}}>⭐ Custom Day Label</div>
+            <div style={{fontSize:9,color:"#64748b",marginBottom:10}}>Label shown on cells marked Custom (e.g. Stat Holiday, Clinic Closed).</div>
+            <div style={{display:"flex",gap:8,alignItems:"center"}}>
+              <input value={customLabelInput} onChange={e=>setCustomLabelInput(e.target.value)} placeholder="e.g. Stat Holiday" style={{background:"#f8fafc",border:"1px solid #e2e8f0",borderRadius:7,padding:"7px 10px",color:"#1e293b",fontSize:11,outline:"none",width:200}}/>
+              <Btn onClick={()=>{setCustomDayLabels([customLabelInput||"Custom"]);}} variant="primary" style={{fontSize:10}}>Save</Btn>
+            </div>
+            <div style={{marginTop:6,fontSize:8,color:"#94a3b8"}}>Current: <strong>{customDayLabels?.[0]||"Custom"}</strong></div>
+          </div>
+        </div>
+      )}
+
+      {adminTab==="pins"&&(
+        <div>
+          <div style={{background:"#fff",border:"1px solid #e2e8f0",borderRadius:9,padding:16,marginBottom:12,boxShadow:"0 1px 3px rgba(0,0,0,0.06)"}}>
+            <div style={{fontWeight:700,fontSize:12,color:"#475569",marginBottom:10,paddingBottom:8,borderBottom:"1px solid #f1f5f9"}}>👁 View-Only PINs</div>
+            {viewerPins.map(v=><div key={v.id} style={{display:"flex",alignItems:"center",gap:8,padding:"7px 10px",borderRadius:6,background:"#f8fafc",border:"1px solid #e2e8f0",marginBottom:4}}>
+              <span style={{fontSize:11,fontWeight:600,color:"#1e293b",minWidth:120}}>{v.name}</span>
+              <span style={{fontSize:9,padding:"2px 8px",borderRadius:20,background:"#e0f2fe",border:"1px solid #7dd3fc",color:"#0369a1",fontWeight:700}}>VIEW ONLY</span>
+              <span style={{fontSize:13,letterSpacing:3,color:"#94a3b8",minWidth:60}}>{revealPin===v.id?v.pin:maskPin(v.pin)}</span>
+              <Btn onClick={()=>setRevealPin(revealPin===v.id?null:v.id)} style={{fontSize:8,padding:"2px 6px"}}>{revealPin===v.id?"Hide":"Peek"}</Btn>
+              <Btn onClick={()=>setViewerPins(prev=>prev.filter(x=>x.id!==v.id))} variant="danger" style={{marginLeft:"auto",fontSize:8,padding:"2px 6px"}}>Remove</Btn>
+            </div>)}
+            <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginTop:8}}>
+              <input value={newViewerName} onChange={e=>setNewViewerName(e.target.value)} placeholder="Name" style={{background:"#f8fafc",border:"1px solid #e2e8f0",borderRadius:7,padding:"7px 10px",color:"#1e293b",fontSize:11,outline:"none",width:140}}/>
+              <input value={newViewerPin} onChange={e=>setNewViewerPin(e.target.value.replace(/\D/g,"").slice(0,4))} placeholder="PIN (3–4 digits)" style={{background:"#f8fafc",border:"1px solid #e2e8f0",borderRadius:7,padding:"7px 10px",color:"#1e293b",fontSize:11,outline:"none",width:120,letterSpacing:3}}/>
+              <Btn onClick={addViewer} variant="primary" style={{fontSize:10}}>+ Add</Btn>
+              {viewerMsg&&<span style={{fontSize:9,color:viewerMsg.startsWith("✓")?"#15803d":"#dc2626",fontWeight:600}}>{viewerMsg}</span>}
+            </div>
+          </div>
+          <div style={{background:"#fff",border:"1px solid #e2e8f0",borderRadius:9,padding:16,boxShadow:"0 1px 3px rgba(0,0,0,0.06)"}}>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12,paddingBottom:8,borderBottom:"1px solid #f1f5f9"}}>
+              <div style={{fontWeight:700,fontSize:12,color:"#475569"}}>Staff PINs</div><Btn onClick={()=>setPinSection(v=>!v)} style={{fontSize:8}}>{pinSection?"▲ Collapse":"▼ Expand"}</Btn>
+            </div>
+            {pinSection&&<div>
+              <div style={{fontSize:9,color:"#94a3b8",marginBottom:12}}>PINs must be unique across all staff.</div>
+              {pinMsg&&<div style={{fontSize:9,color:"#dc2626",fontWeight:600,marginBottom:8,padding:"6px 10px",background:"#fee2e2",borderRadius:6}}>{pinMsg}</div>}
+              {grouped.map(({group,staff})=>{const gc=DEF[group];return(
+                <div key={group} style={{marginBottom:14}}>
+                  <div style={{fontSize:10,fontWeight:700,color:gc.htx,padding:"4px 8px",background:gc.gbg,borderRadius:5,marginBottom:6,borderLeft:`2px solid ${gc.acc}`}}>{group}</div>
+                  {staff.map(s=>{const k=`${s.name}||${s.group}`;const isEditing=editingPin&&editingPin.name===s.name&&editingPin.group===s.group;const isRevealed=revealPin===k;return(
+                    <div key={k} style={{display:"flex",alignItems:"center",gap:8,padding:"7px 10px",borderRadius:6,background:isEditing?"#eff6ff":"#f8fafc",border:`1px solid ${isEditing?"#93c5fd":"#e2e8f0"}`,marginBottom:4}}>
+                      <span style={{fontSize:11,fontWeight:600,color:"#1e293b",minWidth:100}}>{s.name}</span>
+                      {!s.pin&&<span style={{fontSize:8,color:"#ef4444",fontWeight:600}}>⚠ No PIN</span>}
+                      {isEditing?(
+                        <div style={{display:"flex",gap:5,alignItems:"center",flex:1}}>
+                          <input autoFocus type="tel" maxLength={4} value={pinInput} onChange={e=>setPinInput(e.target.value.replace(/\D/g,""))} placeholder="3–4 digits" style={{width:80,background:"#fff",border:"1px solid #93c5fd",borderRadius:6,padding:"5px 8px",fontSize:13,outline:"none",letterSpacing:4,textAlign:"center"}}/>
+                          <Btn onClick={()=>{if(pinInput.length>=3){let dup=false;setPin(s.name,s.group,pinInput,()=>{dup=true;});if(!dup){setEditingPin(null);setPinInput("");setPinMsg("");}else{setPinInput("");setPinMsg("⚠ PIN already used.");}}} } variant="primary" style={{fontSize:9}} disabled={pinInput.length<3}>Save</Btn>
+                          <Btn onClick={()=>{setEditingPin(null);setPinInput("");}} style={{fontSize:9}}>Cancel</Btn>
+                          {s.pin&&<Btn onClick={()=>{setPin(s.name,s.group,"");setEditingPin(null);setPinInput("");}} variant="danger" style={{fontSize:9}}>Clear</Btn>}
+                        </div>
+                      ):(
+                        <div style={{display:"flex",gap:6,alignItems:"center",flex:1}}>
+                          <span style={{fontSize:14,letterSpacing:3,color:"#94a3b8",minWidth:60}}>{s.pin?(isRevealed?s.pin:maskPin(s.pin)):"—"}</span>
+                          {s.pin&&<Btn onClick={()=>setRevealPin(isRevealed?null:k)} style={{fontSize:8,padding:"2px 6px"}}>{isRevealed?"Hide":"Peek"}</Btn>}
+                          <Btn onClick={()=>{setEditingPin({name:s.name,group:s.group});setPinInput(s.pin||"");setRevealPin(null);}} style={{fontSize:9,marginLeft:"auto"}}>{s.pin?"Change PIN":"Set PIN"}</Btn>
+                        </div>
+                      )}
+                    </div>
+                  );})}
+                </div>
+              );})}
+            </div>}
+          </div>
+        </div>
+      )}
+
+      {adminTab==="colours"&&(
+        <div style={{background:"#fff",border:"1px solid #e2e8f0",borderRadius:9,padding:16,boxShadow:"0 1px 3px rgba(0,0,0,0.06)"}}>
+          <div style={{fontWeight:700,fontSize:12,color:"#475569",marginBottom:12,paddingBottom:8,borderBottom:"1px solid #f1f5f9"}}>Shift Colours</div>
+          <CR label="Tech Shifts" ckey="Tech" fields={["cbg","cbo","ctx"]}/><CR label="VA Shifts" ckey="VA" fields={["cbg","cbo","ctx"]}/><CR label="CCR Shifts" ckey="CCR" fields={["cbg","cbo","ctx"]}/>
+          <div style={{fontWeight:700,fontSize:12,color:"#475569",margin:"12px 0 8px",paddingTop:8,borderTop:"1px solid #f1f5f9"}}>Status Colours</div>
+          <CR label="Vacation (VAC)" ckey="VAC" fields={["bg","bo","tx"]}/><CR label="Day Off (OFF)" ckey="OFF" fields={["bg","bo","tx"]}/><CR label="Closed" ckey="CLOSED" fields={["bg","bo","tx"]}/><CR label="Sick" ckey="SICK" fields={["bg","bo","tx"]}/><CR label="Custom Day ⭐" ckey="CUSTOM" fields={["bg","bo","tx"]}/>
+          <Btn onClick={()=>setC({...DEF})} variant="danger" style={{marginTop:8}}>Reset All</Btn>
+        </div>
+      )}
+
+      {adminTab==="passwords"&&(
+        <div>
+          <div style={{background:"#fff",border:"1px solid #e2e8f0",borderRadius:9,padding:16,marginBottom:12,boxShadow:"0 1px 3px rgba(0,0,0,0.06)"}}>
+            <div style={{fontWeight:700,fontSize:12,color:"#475569",marginBottom:12,paddingBottom:8,borderBottom:"1px solid #f1f5f9"}}>🔐 Admin Password 1</div>
+            <div style={{fontSize:9,color:"#64748b",marginBottom:8}}>Name shown in audit log for this password.</div>
+            <input value={adminName1} onChange={e=>setAdminName1(e.target.value||"Admin")} placeholder="Admin name (e.g. Daniel)" style={{background:"#f8fafc",border:"1px solid #e2e8f0",borderRadius:7,padding:"7px 10px",color:"#1e293b",fontSize:11,outline:"none",width:200,marginBottom:10}}/>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:10}}>
+              <input type="password" value={np} onChange={e=>{setNp(e.target.value);setMsg("");}} placeholder="New password" style={{background:"#f8fafc",border:"1px solid #e2e8f0",borderRadius:7,padding:"8px 12px",color:"#1e293b",fontSize:12,outline:"none",width:180}}/>
+              <input type="password" value={cp} onChange={e=>{setCp(e.target.value);setMsg("");}} placeholder="Confirm" style={{background:"#f8fafc",border:"1px solid #e2e8f0",borderRadius:7,padding:"8px 12px",color:"#1e293b",fontSize:12,outline:"none",width:180}}/>
+              <Btn onClick={()=>{if(!np){setMsg("Enter a password.");return;}if(np!==cp){setMsg("Passwords don't match.");return;}setPwd(np);setNp("");setCp("");setMsg("✓ Updated!");}} variant="primary" style={{padding:"8px 16px",fontSize:11}}>Update</Btn>
+            </div>
+            <div style={{fontSize:9,color:"#64748b",marginBottom:6}}>Admin PIN (3–4 digits) — alternative to password for quick unlock.</div>
+            <div style={{display:"flex",gap:8,alignItems:"center"}}>
+              <input type="tel" maxLength={4} value={adminPin1} onChange={e=>setAdminPin1(e.target.value.replace(/\D/g,""))} placeholder="PIN (optional)" style={{background:"#f8fafc",border:"1px solid #e2e8f0",borderRadius:7,padding:"7px 10px",color:"#1e293b",fontSize:13,outline:"none",width:100,letterSpacing:4}}/>
+              {adminPin1&&<Btn onClick={()=>setAdminPin1("")} variant="danger" style={{fontSize:9}}>Clear</Btn>}
+              {adminPin1.length>=3&&<span style={{fontSize:8,color:"#15803d",fontWeight:600}}>✓ PIN set</span>}
+            </div>
+            {msg&&<div style={{marginTop:8,fontSize:10,color:msg.startsWith("✓")?"#15803d":"#dc2626",fontWeight:600}}>{msg}</div>}
+          </div>
+          <div style={{background:"#fff",border:"1px solid #e2e8f0",borderRadius:9,padding:16,boxShadow:"0 1px 3px rgba(0,0,0,0.06)"}}>
+            <div style={{fontWeight:700,fontSize:12,color:"#475569",marginBottom:12,paddingBottom:8,borderBottom:"1px solid #f1f5f9"}}>🔐 Admin Password 2</div>
+            <div style={{fontSize:9,color:"#94a3b8",marginBottom:8}}>Either password grants full access. Name shown in audit log.</div>
+            <input value={adminName2} onChange={e=>setAdminName2(e.target.value)} placeholder="Admin name (e.g. Dr. Smith)" style={{background:"#f8fafc",border:"1px solid #e2e8f0",borderRadius:7,padding:"7px 10px",color:"#1e293b",fontSize:11,outline:"none",width:200,marginBottom:10}}/>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:10}}>
+              <input type="password" value={np2} onChange={e=>{setNp2(e.target.value);setMsg2("");}} placeholder="New password" style={{background:"#f8fafc",border:"1px solid #e2e8f0",borderRadius:7,padding:"8px 12px",color:"#1e293b",fontSize:12,outline:"none",width:180}}/>
+              <input type="password" value={cp2} onChange={e=>{setCp2(e.target.value);setMsg2("");}} placeholder="Confirm" style={{background:"#f8fafc",border:"1px solid #e2e8f0",borderRadius:7,padding:"8px 12px",color:"#1e293b",fontSize:12,outline:"none",width:180}}/>
+              <Btn onClick={()=>{if(!np2){setMsg2("Enter a password.");return;}if(np2!==cp2){setMsg2("Passwords don't match.");return;}setPwd2(np2);setNp2("");setCp2("");setMsg2("✓ Updated!");}} variant="primary" style={{padding:"8px 16px",fontSize:11}}>Update</Btn>
+            </div>
+            <div style={{fontSize:9,color:"#64748b",marginBottom:6}}>Admin PIN (3–4 digits) — alternative to password for quick unlock.</div>
+            <div style={{display:"flex",gap:8,alignItems:"center"}}>
+              <input type="tel" maxLength={4} value={adminPin2} onChange={e=>setAdminPin2(e.target.value.replace(/\D/g,""))} placeholder="PIN (optional)" style={{background:"#f8fafc",border:"1px solid #e2e8f0",borderRadius:7,padding:"7px 10px",color:"#1e293b",fontSize:13,outline:"none",width:100,letterSpacing:4}}/>
+              {adminPin2&&<Btn onClick={()=>setAdminPin2("")} variant="danger" style={{fontSize:9}}>Clear</Btn>}
+              {adminPin2.length>=3&&<span style={{fontSize:8,color:"#15803d",fontWeight:600}}>✓ PIN set</span>}
+            </div>
+            {msg2&&<div style={{marginTop:8,fontSize:10,color:msg2.startsWith("✓")?"#15803d":"#dc2626",fontWeight:600}}>{msg2}</div>}
+            {pwd2&&<div style={{marginTop:8,fontSize:9,color:"#15803d"}}>✓ Password 2 set — logged as "{adminName2||"Admin 2"}".</div>}
+          </div>
+        </div>
+      )}
+
+      {adminTab==="data"&&(
+        <div>
+          <div style={{background:"#fff",border:"1px solid #e2e8f0",borderRadius:9,padding:16,marginBottom:12,boxShadow:"0 1px 3px rgba(0,0,0,0.06)"}}>
+            <div style={{fontWeight:700,fontSize:12,color:"#475569",marginBottom:8,paddingBottom:8,borderBottom:"1px solid #f1f5f9"}}>📦 Archive Snapshot</div>
+            <div style={{fontSize:9,color:"#94a3b8",marginBottom:12}}>Downloads a read-only HTML snapshot of all current schedule data.</div>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              <Btn onClick={doArchiveSnapshot} variant="primary" style={{fontSize:10}}>⬇ Download Snapshot</Btn>
+              <Btn onClick={doExportJson} style={{fontSize:10,background:"#f0fdf4",border:"1px solid #86efac",color:"#15803d"}}>📦 Export All Data (JSON)</Btn>
+            </div>
+            <div style={{fontSize:8,color:"#94a3b8",marginTop:8}}>Use "Export All Data" to get a JSON file for migrating to the Google Sheet via seedScheduleData().</div>
+            {archiveMsg&&<div style={{marginTop:8,fontSize:9,color:archiveMsg.startsWith("✓")?"#15803d":"#dc2626",fontWeight:600}}>{archiveMsg}</div>}
+          </div>
+          <div style={{background:"#fff",border:"2px solid #ef4444",borderRadius:9,padding:16,boxShadow:"0 1px 3px rgba(0,0,0,0.06)"}}>
+            <div style={{fontWeight:700,fontSize:12,color:"#dc2626",marginBottom:8,paddingBottom:8,borderBottom:"1px solid #fee2e2"}}>🗑 Clear All Data</div>
+            <div style={{fontSize:9,color:"#64748b",marginBottom:12}}>Clears all shift data, requests, messages and history. You will choose a new start date and fresh weeks will be generated with existing staff.</div>
+            {clearConfirm1&&<ClearDataModal masterWeeks={masterWeeks} liveWeeks={liveWeeks} pwd={pwd_for_clear[0]} pwd2={pwd_for_clear[1]} onConfirm={sd=>{onClearAll(sd);setClearConfirm1(false);}} onClose={()=>setClearConfirm1(false)}/>}
+            <Btn onClick={()=>setClearConfirm1(true)} variant="danger" style={{fontSize:10}}>🗑 Clear All Data...</Btn>
+          </div>
+        </div>
+      )}
+
+      {adminTab==="audit"&&<AuditPage auditLog={auditLog} masterWeeks={masterWeeks} masterArchived={masterArchived} deletedEmps={deletedEmps}/>}
+      {adminTab==="backfill"&&<BackfillPage liveWeeks={liveWeeks} setLiveWeeks={setLiveWeeks} liveArchived={liveArchived} setLiveArchived={setLiveArchived} masterWeeks={masterWeeks} setMasterWeeks={setMasterWeeks} masterArchived={masterArchived} setMasterArchived={setMasterArchived} C={C}/>}
+    </div>
+  );
+}
+
+/* ══ PRINT MODAL ─────────────────────────────────────────────────── */
+function PrintModal({weeks,isAdmin,onClose,customDayLabels}){
+  const[printing,setPrinting]=useState(false);
+  const pubWeeks=weeks.filter(w=>w.approved);
+  const customLabel=customDayLabels?.[0]||"Custom";
+  const doPrint=()=>{
+    setPrinting(true);
+    const html=`<!DOCTYPE html><html><head><meta charset="utf-8"><title>HPVH Live Schedule</title><style>*{box-sizing:border-box;}body{font-family:Arial,sans-serif;font-size:8px;margin:8px;background:#fff;}h2{font-size:11px;margin:0 0 6px;color:#1e293b;}h3{font-size:9px;margin:8px 0 3px;color:#475569;}table{border-collapse:collapse;width:100%;margin-bottom:6px;page-break-inside:avoid;}th,td{border:1px solid #d1d5db;padding:2px 4px;text-align:center;font-size:7px;vertical-align:middle;}th{background:#f1f5f9;font-weight:700;}.grp{background:#e2e8f0;text-align:left;font-weight:700;padding:3px 6px;}.name{text-align:left;font-weight:600;white-space:nowrap;}.vac{background:#fef3c7;color:#78350f;}.off{background:#d1d5db;color:#374151;}.closed{background:#9ca3af;color:#1f2937;}.sick{background:#fee2e2;color:#991b1b;}.swap{background:#ede9fe;color:#4c1d95;}.custom{background:#f0e6ff;color:#581c87;}@page{size:landscape;margin:0.7cm;}</style></head><body><h2>HPVH Live Schedule — Printed ${new Date().toLocaleDateString()}</h2>${pubWeeks.map(w=>{const allNames={};GROUPS.forEach(g=>{allNames[g]=[];const seen=new Set();(w.groups[g]||[]).forEach(e=>{if(!seen.has(e.name)){seen.add(e.name);allNames[g].push(e.name);}});});return`<h3>${w.label}</h3><table><tr><th class="name">Staff</th>${DAYS.map((d,i)=>`<th>${d}<br/><span style="font-weight:400;color:#6b7280">${w.dates?.[i]||""}</span></th>`).join("")}<th>Hrs</th></tr>${GROUPS.flatMap(g=>{const names=allNames[g];if(!names.length)return[];return[`<tr><td class="grp" colspan="${DAYS.length+2}">${g}</td></tr>`,...names.map(name=>{const emp=(w.groups[g]||[]).find(e=>e.name===name);if(!emp)return"";const tot=eTotal(emp);return`<tr><td class="name">${name}</td>${emp.shifts.map(s=>{if(!s)return"<td></td>";if(s.st==="VAC")return`<td class="vac">🌴VAC</td>`;if(s.st==="OFF")return`<td class="off">OFF</td>`;if(s.st==="CLOSED")return`<td class="closed">—</td>`;if(s.st==="SICK")return`<td class="sick">🤒SICK${s.sh?` ${s.sh}h`:""}</td>`;if(s.st==="CUSTOM")return`<td class="custom">⭐${s.customLabel||customLabel}</td>`;if(s.swapped)return`<td class="swap">↔${s.t}</td>`;return`<td>${s.t||""}</td>`;}).join("")}<td style="font-weight:700">${tot||""}</td></tr>`;})];}).join("")}</table>`;}).join("")}</body></html>`;
+    try{
+      const ifr=document.createElement("iframe");ifr.style.cssText="position:fixed;top:-9999px;left:-9999px;width:1400px;height:900px;border:none;";
+      document.body.appendChild(ifr);ifr.contentDocument.open();ifr.contentDocument.write(html);ifr.contentDocument.close();
+      setTimeout(()=>{try{ifr.contentWindow.focus();ifr.contentWindow.print();}catch(e){}setTimeout(()=>{if(document.body.contains(ifr))document.body.removeChild(ifr);setPrinting(false);},3000);},700);
+    }catch(e){setPrinting(false);}
+  };
+  return(
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:9998}}>
+      <div data-ov style={{background:"#fff",borderRadius:14,padding:24,width:300,boxShadow:"0 24px 64px rgba(0,0,0,0.2)"}}>
+        <div style={{fontWeight:700,fontSize:14,color:"#1e293b",marginBottom:8}}>🖨 Print Live Schedule</div>
+        <div style={{fontSize:9,color:"#94a3b8",marginBottom:16}}>Prints the current live published schedule only.</div>
+        <div style={{display:"flex",gap:8}}><Btn onClick={doPrint} variant="primary" style={{flex:1,padding:"9px",fontSize:11}}>{printing?"Preparing…":"🖨 Print"}</Btn><Btn onClick={onClose} style={{padding:"9px 14px",fontSize:11}}>Close</Btn></div>
+      </div>
+    </div>
+  );
+}
+
+/* ══ ROOT APP ════════════════════════════════════════════════════════ */
+function App(){
+  /* ── GAS session state ───────────────────────────────────────────── */
+  const[gasToken,setGasToken]       = useState(null);   // Google ID token
+  const[gasRole,setGasRole]         = useState(null);   // "admin"|"staff"|"viewer"
+  const[gasLoading,setGasLoading]   = useState(false);  // initial data load
+  const[gasError,setGasError]       = useState("");
+  const[lastModTs,setLastModTs]     = useState(0);      // for polling
+  const[syncing,setSyncing]         = useState(false);  // save-in-progress indicator
+
+  /* ── Schedule state (same as v15) ───────────────────────────────── */
+  const[liveWeeks,setLiveWeeks]           = useState([]);
+  const[masterWeeks,setMasterWeeks]       = useState([]);
+  const[liveArchived,setLiveArchived]     = useState([]);
+  const[masterArchived,setMasterArchived] = useState([]);
+  const[requests,setRequests]             = useState([]);
+  const[messages,setMessages]             = useState([]);
+  const[swapRequests,setSwapRequests]     = useState([]);
+  const[auditLog,setAuditLog]             = useState([]);
+  const[availability,setAvailability]     = useState(()=>new Set());
+  const[lockedTOWeeks,setLockedTOWeeks]   = useState(()=>new Set());
+  const[C,setC]                           = useState({...DEF});
+  const[pwd,setPwd]                       = useState("hpvh2024");
+  const[pwd2,setPwd2]                     = useState("");
+  const[adminName1,setAdminName1]         = useState("Admin");
+  const[adminName2,setAdminName2]         = useState("");
+  const[adminPin1,setAdminPin1]           = useState("");
+  const[adminPin2,setAdminPin2]           = useState("");
+  const[staffPins,setStaffPins]           = useState([]);
+  const[viewerPins,setViewerPins]         = useState([]);
+  const[lockMs,setLockMs]                 = useState(DEFAULT_LOCK_MS);
+  const[access,setAccess]                 = useState(null);
+  const[isUnlocked,setIsUnlocked]         = useState(false);
+  const[page,setPage]                     = useState("main");
+  const[pwdModal,setPwdModal]             = useState(false);
+  const[pwdInput,setPwdInput]             = useState("");const[pwdErr,setPwdErr]=useState(false);
+  const[picker,setPicker]                 = useState(null);const[ctx,setCtx]=useState(null);
+  const[ctxSick,setCtxSick]               = useState("0");const[ctxCustomLabel,setCtxCustomLabel]=useState("");
+  const[printOpen,setPrintOpen]           = useState(false);
+  const[staffPinModal,setStaffPinModal]   = useState(null);
+  const[staffUnlocked,setStaffUnlocked]   = useState(()=>new Set());
+  const[swapRequesterInfo,setSwapRequesterInfo] = useState(null);
+  const[swapPinModal,setSwapPinModal]     = useState(false);
+  const[swapModal,setSwapModal]           = useState(null);
+  const[currentUser,setCurrentUser]       = useState(null);
+  const[undoStack,setUndoStack]           = useState(null);
+  const[deletedEmps,setDeletedEmps]       = useState([]);
+  const[customDayLabels,setCustomDayLabels] = useState(["Custom"]);
+  const staffTimers = useRef({});const lastAct = useRef(Date.now());
+
+  /* ── Load schedule data from GAS response ────────────────────────── */
+  function applySchedData(data) {
+    if (!data) return;
+    if (data.liveWeeks)     setLiveWeeks(data.liveWeeks);
+    if (data.masterWeeks)   setMasterWeeks(data.masterWeeks);
+    if (data.liveArchived)  setLiveArchived(data.liveArchived);
+    if (data.masterArchived)setMasterArchived(data.masterArchived);
+    if (data.requests)      setRequests(data.requests);
+    if (data.messages)      setMessages(data.messages);
+    if (data.swapRequests)  setSwapRequests(data.swapRequests);
+    if (data.auditLog)      setAuditLog(data.auditLog);
+    if (data.staffPins)     setStaffPins(data.staffPins);
+    const s = data.settings || {};
+    if (s.adminPwd)         setPwd(s.adminPwd);
+    if (s.adminPwd2)        setPwd2(s.adminPwd2);
+    if (s.adminName1)       setAdminName1(s.adminName1);
+    if (s.adminName2)       setAdminName2(s.adminName2);
+    if (s.adminPin1)        setAdminPin1(String(s.adminPin1||""));
+    if (s.adminPin2)        setAdminPin2(String(s.adminPin2||""));
+    if (s.lockMs)           setLockMs(Number(s.lockMs)||DEFAULT_LOCK_MS);
+    if (s.customDayLabels)  setCustomDayLabels(Array.isArray(s.customDayLabels)?s.customDayLabels:["Custom"]);
+    if (s.colours && Object.keys(s.colours).length>0) setC({...DEF,...s.colours});
+  }
+
+  /* ── Called by LandingLock after Google Sign-In + PIN success ─────── */
+  const handleSignedIn = useCallback(async ({token,role,name,group,schedData})=>{
+    setGasToken(token);
+    setGasRole(role);
+    setGasLoading(true);
+    setGasError("");
+    try {
+      applySchedData(schedData);
+      // Get current timestamp for polling baseline
+      const modRes = await gasGetLastMod(token);
+      setLastModTs(modRes.ts || 0);
+      // Set up session
+      const isAdmin = role==="admin";
+      setAccess(role);
+      if (isAdmin) { setIsUnlocked(true); lastAct.current=Date.now(); }
+      setCurrentUser({name,group});
+      // Log login to GAS audit (fire-and-forget)
+      const entry={actor:name||"Unknown",description:`${role==="admin"?"Admin login":"Staff login"} via Google`,type:"login",ts:nowTs()};
+      gasAddAudit(token,entry).catch(()=>{});
+      setAuditLog(prev=>[...prev,{...entry,id:uid()}]);
+    } catch(err) {
+      setGasError("Could not load schedule data: "+err.message);
+    } finally {
+      setGasLoading(false);
+    }
+  },[]);
+
+  /* ── GAS save helper — debounced, called after every state change ─── */
+  const saveToGas = useCallback(async (changes) => {
+    if (!gasToken) return;
+    setSyncing(true);
+    try {
+      await gasSaveSchedule(gasToken, changes);
+    } catch(err) {
+      // Non-fatal — data is still in memory, will retry on next save
+      console.warn("GAS save failed:", err.message);
+    } finally {
+      setSyncing(false);
+    }
+  },[gasToken]);
+
+  /* ── Polling — check for remote changes every 12 seconds ─────────── */
+  useEffect(()=>{
+    if (!gasToken || !access) return;
+    const interval = setInterval(async ()=>{
+      try {
+        const res = await gasGetLastMod(gasToken);
+        if (res.ts && res.ts > lastModTs) {
+          setLastModTs(res.ts);
+          const sched = await gasGetSchedule(gasToken);
+          applySchedData(sched.data);
+        }
+      } catch(err) {
+        // Polling failure is silent — app keeps working from memory
+      }
+    }, POLL_INTERVAL_MS);
+    return ()=>clearInterval(interval);
+  },[gasToken,access,lastModTs]);
+
+  const addAudit=useCallback((actor,description,type="action",context="")=>{
+    const entry={id:uid(),actor,description,type,context,ts:nowTs()};
+    setAuditLog(prev=>[...prev,entry]);
+    if(gasToken) gasAddAudit(gasToken,{actor,description,type,context,ts:nowTs()}).catch(()=>{});
+  },[gasToken]);
+
+  const pushUndo=useCallback(action=>setUndoStack(action),[]);
+  const doUndo=()=>{
+    if(!undoStack)return;
+    if(undoStack.type==="delEmp"&&undoStack.snapshot){setMasterWeeks(undoStack.snapshot);addAudit("Admin","Undo: restored deleted employee");}
+    setUndoStack(null);
+  };
+
+  useEffect(()=>{
+    const allNames=new Set();
+    masterWeeks.forEach(w=>GROUPS.forEach(g=>(w.groups[g]||[]).forEach(e=>{if(e.name&&e.name.trim().length>2&&e.name!=="New Staff")allNames.add(`${e.name.trim()}||${g}`);})));
+    setStaffPins(prev=>{
+      const existing=new Set(prev.map(s=>`${s.name}||${s.group}`));
+      const toAdd=[...allNames].filter(k=>!existing.has(k)).map(k=>{const[name,group]=k.split("||");return{name,group,pin:""};});
+      const pruned=prev.filter(s=>allNames.has(`${s.name}||${s.group}`)||s.pin);
+      return toAdd.length?[...pruned,...toAdd]:pruned;
+    });
+    setDeletedEmps(prev=>{
+      const existingDelKeys=new Set(prev.map(d=>`${d.name}||${d.group}`));
+      const newlyDeleted=staffPins.filter(s=>s.pin&&!allNames.has(`${s.name}||${s.group}`)&&!existingDelKeys.has(`${s.name}||${s.group}`)).map(s=>({name:s.name,group:s.group,deleted:true}));
+      return newlyDeleted.length?[...prev,...newlyDeleted]:prev;
+    });
+  },[masterWeeks]);
+
+  useEffect(()=>{
+    if(!isUnlocked)return;
+    const bump=()=>{lastAct.current=Date.now();};
+    const check=setInterval(()=>{if(Date.now()-lastAct.current>lockMs){setIsUnlocked(false);if(["master","past-sched","stats","admin"].includes(page))setPage("main");}},15000);
+    ["mousedown","keydown","touchstart"].forEach(e=>document.addEventListener(e,bump));
+    return()=>{clearInterval(check);["mousedown","keydown","touchstart"].forEach(e=>document.removeEventListener(e,bump));};
+  },[isUnlocked,page,lockMs]);
+
+  useEffect(()=>{const h=e=>{if(!e.target.closest("[data-ov]")){setPicker(null);setCtx(null);}};document.addEventListener("mousedown",h);return()=>document.removeEventListener("mousedown",h);},[]);
+
+  const onRequestStaffPin=(name,group)=>{const k=`${name}||${group}`;if(staffUnlocked.has(k))return;setStaffPinModal({name,group});};
+  const grantStaffUnlock=(name,group)=>{
+    const k=`${name}||${group}`;
+    setStaffUnlocked(prev=>{const n=new Set(prev);n.add(k);return n;});
+    if(staffTimers.current[k])clearTimeout(staffTimers.current[k]);
+    staffTimers.current[k]=setTimeout(()=>setStaffUnlocked(prev=>{const n=new Set(prev);n.delete(k);return n;}),lockMs);
+  };
+
+  /* ── Live week mutations — save to GAS after every change ─────────── */
+  const updLive=(wid,g,ei,si,patch)=>setLiveWeeks(prev=>{
+    const next=prev.map(w=>{if(w.id!==wid)return w;return{...w,groups:{...w.groups,[g]:w.groups[g].map((emp,i)=>i!==ei?emp:{...emp,shifts:emp.shifts.map((s,j)=>j!==si?s:{...s,...patch})})}}; });
+    saveToGas({liveWeeks:next});
+    return next;
+  });
+  const appReqLive=(wid,g,ei,si)=>{const s=liveWeeks.find(w=>w.id===wid)?.groups[g]?.[ei]?.shifts[si];updLive(wid,g,ei,si,{reqSt:"APPROVED"});if(s?.reqId)setRequests(prev=>{const next=prev.map(r=>r.id===s.reqId?{...r,status:"APPROVED"}:r);saveToGas({requests:next});return next;});};
+  const denyReqLive=(wid,g,ei,si)=>{const s=liveWeeks.find(w=>w.id===wid)?.groups[g]?.[ei]?.shifts[si];updLive(wid,g,ei,si,{t:"",h:0,st:null,reqSt:"DENIED",reqId:null});if(s?.reqId)setRequests(prev=>{const next=prev.map(r=>r.id===s.reqId?{...r,status:"DENIED"}:r);saveToGas({requests:next});return next;});};
+
+  const ctxIsM=ctx?.isMaster;
+  const ctxAct=action=>{
+    if(!ctx)return;const{weekId:wid,group:g,empIdx:ei,shiftIdx:si}=ctx;
+    const updFn=ctxIsM?(patch=>setMasterWeeks(prev=>{const next=prev.map(w=>{if(w.id!==wid)return w;return{...w,groups:{...w.groups,[g]:w.groups[g].map((emp,i)=>i!==ei?emp:{...emp,shifts:emp.shifts.map((s,j)=>j!==si?s:{...s,...patch})})}}; });saveToGas({masterWeeks:next});return next;})):(patch=>updLive(wid,g,ei,si,patch));
+    if(["VAC","OFF","CLOSED"].includes(action))updFn({st:action,rc:null,customLabel:null});
+    else if(action==="CUSTOM"){const lbl=ctxCustomLabel||customDayLabels[0]||"Custom";updFn({st:"CUSTOM",rc:null,customLabel:lbl,t:"",h:0});}
+    else if(action==="SICK")updFn({st:"SICK",sh:parseFloat(ctxSick)||0});
+    else if(Object.keys(TAG_CFG).includes(action)){const w2=ctxIsM?masterWeeks:liveWeeks;const curTg=w2.find(w=>w.id===wid)?.groups[g]?.[ei]?.shifts[si]?.tg||[];updFn({tg:curTg.includes(action)?curTg.filter(t=>t!==action):[...curTg,action]});}
+    else if(action.startsWith("RC_")){const nr=action.slice(3);const w2=ctxIsM?masterWeeks:liveWeeks;const cur=w2.find(w=>w.id===wid)?.groups[g]?.[ei]?.shifts[si];updFn({rc:cur?.rc===nr?null:nr});}
+    else if(action==="CLEAR")updFn({t:"",h:0,st:null,tg:[],sh:null,rc:null,reqId:null,reqSt:null,customLabel:null});
+    setCtx(null);
+  };
+
+  const applyPreset=t=>{
+    if(!picker)return;const{weekId:wid,group:g,empIdx:ei,shiftIdx:si,keepTags:kt,isMaster}=picker;
+    const patch={t,h:toH(t),st:null,tg:kt||[],sh:null,customLabel:null};
+    if(isMaster)setMasterWeeks(prev=>{const next=prev.map(w=>{if(w.id!==wid)return w;return{...w,groups:{...w.groups,[g]:w.groups[g].map((emp,i)=>i!==ei?emp:{...emp,shifts:emp.shifts.map((s,j)=>j!==si?s:{...s,...patch})})}}; });saveToGas({masterWeeks:next});return next;});
+    else updLive(wid,g,ei,si,patch);
+    setPicker(null);
+  };
+
+  const archiveWeek=wid=>{
+    setLiveWeeks(prev=>{const w=prev.find(x=>x.id===wid);let nextArchived=liveArchived;if(w){nextArchived=liveArchived.some(x=>x.id===wid)?liveArchived:sortWeeks([...liveArchived,{...deepClone(w),approved:true}]);setLiveArchived(nextArchived);saveToGas({liveArchived:nextArchived});}const next=prev.filter(x=>x.id!==wid);saveToGas({liveWeeks:next});return next;});
+    setMasterWeeks(prev=>{const next=prev.map(w=>w.id===wid?{...w,published:false}:w);saveToGas({masterWeeks:next});return next;});
+  };
+  const unarchiveWeek=wid=>{
+    setLiveArchived(prev=>{
+      const w=prev.find(x=>x.id===wid);
+      if(w){const clone=deepClone(w);clone.approved=true;
+        setLiveWeeks(lv=>{if(lv.some(x=>x.id===wid))return lv;if(datesOverlap(clone.dates,lv)){alert("Cannot restore: dates overlap.");return lv;}const next=sortWeeks([...lv,clone]);saveToGas({liveWeeks:next});return next;});
+        setMasterWeeks(mv=>{const next=mv.some(x=>x.id===wid)?mv.map(m=>m.id===wid?{...m,published:true}:m):sortWeeks([...mv,{...deepClone(w),published:true}]);saveToGas({masterWeeks:next});return next;});
+      }
+      const next=prev.filter(x=>x.id!==wid);saveToGas({liveArchived:next});return next;
+    });
+  };
+
+  const pickerPos=rect=>{const ph=300;const y=(window.innerHeight-rect.bottom)>ph?rect.bottom+4:Math.max(60,rect.top-ph-4);return{x:Math.min(rect.left,window.innerWidth-258),y};};
+  const onTapLive=(wid,g,ei,si,di,rect)=>{const{x,y}=pickerPos(rect);const kt=liveWeeks.find(w=>w.id===wid)?.groups[g]?.[ei]?.shifts[si]?.tg||[];setPicker({weekId:wid,group:g,empIdx:ei,shiftIdx:si,dayIdx:di,x,y,keepTags:kt,isMaster:false});};
+  const onLongLive=(wid,g,ei,si,x,y)=>{setCtx({weekId:wid,group:g,empIdx:ei,shiftIdx:si,x,y,isMaster:false});const s=liveWeeks.find(w=>w.id===wid)?.groups[g]?.[ei]?.shifts[si];setCtxSick(s?.h!=null?String(s.h):"0");setCtxCustomLabel(s?.customLabel||customDayLabels[0]||"Custom");};
+  const onCtxLive=(wid,g,ei,si,x,y)=>onLongLive(wid,g,ei,si,x,y);
+  const onSC=p=>setPicker(p);
+  const onRC=p=>{setCtx(p);const s=masterWeeks.find(w=>w.id===p.weekId)?.groups[p.group]?.[p.empIdx]?.shifts[p.shiftIdx];setCtxSick(s?.h!=null?String(s.h):"0");setCtxCustomLabel(s?.customLabel||customDayLabels[0]||"Custom");};
+  const ctxShift=(ctx?.isMaster?masterWeeks:liveWeeks)?.find(w=>w.id===ctx?.weekId)?.groups[ctx?.group]?.[ctx?.empIdx]?.shifts[ctx?.shiftIdx];
+  const pendingCount=requests.filter(r=>r.status==="PENDING").length;
+  const unreadMsgCount=messages.filter(m=>!m.read&&!m.isSwap).length;
+  const pendingSwapCount=swapRequests.filter(s=>s.status==="PENDING").length;
+
+  const onClearAll=(startDate)=>{
+    const refWeek=liveWeeks.length?liveWeeks[liveWeeks.length-1]:(masterWeeks.length?masterWeeks[masterWeeks.length-1]:null);
+    const staffByGroup={};
+    GROUPS.forEach(g=>{staffByGroup[g]=(refWeek?.groups[g]||[]).map(e=>({name:e.name,group:g}));});
+    const d=new Date(startDate);const dow=d.getDay()===0?6:d.getDay()-1;
+    d.setDate(d.getDate()-dow);
+    const MON2=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+    const buildWeek=(startMon)=>{
+      const dates=Array(7).fill(0).map((_,i)=>{const dd=new Date(startMon);dd.setDate(dd.getDate()+i);return`${dd.getDate()}-${MON2[dd.getMonth()]}`;});
+      const groups={};
+      GROUPS.forEach(g=>{groups[g]=(staffByGroup[g]||[]).map(e=>({id:uid(),name:e.name,shifts:dates.map((_,i)=>i===6?mkCl():mk(""))}));});
+      return{id:uid(),label:wkLabel(dates),dates,published:true,groups};
+    };
+    const newWeeks=[];let cur=new Date(d);
+    for(let i=0;i<5;i++){newWeeks.push(buildWeek(cur));cur.setDate(cur.getDate()+7);}
+    const emptyLive=newWeeks.map(w=>({...deepClone(w),approved:true}));
+    setMasterWeeks(newWeeks);setLiveWeeks(emptyLive);
+    setLiveArchived([]);setMasterArchived([]);
+    setRequests([]);setMessages([]);setSwapRequests([]);setAuditLog([]);
+    setAvailability(new Set());setLockedTOWeeks(new Set());
+    setDeletedEmps([]);setUndoStack(null);setCurrentUser(null);
+    setSwapRequesterInfo(null);setIsUnlocked(false);setPage("main");
+    saveToGas({liveWeeks:emptyLive,masterWeeks:newWeeks,liveArchived:[],masterArchived:[],requests:[],messages:[],swapRequests:[],auditLog:[]});
+  };
+
+  const approveSwap=useCallback(sid=>{
+    setSwapRequests(prev=>{
+      const swap=prev.find(s=>s.id===sid);if(!swap)return prev;
+      setLiveWeeks(lw=>{const next=lw.map(week=>{
+        if(week.id!==swap.weekId)return week;
+        const updated={...week,groups:{...week.groups}};
+        GROUPS.forEach(g=>{updated.groups[g]=(updated.groups[g]||[]).map(emp=>{
+          if(emp.name===swap.requesterName&&g===swap.requesterGroup){const sh=[...emp.shifts];sh[swap.shiftIdx]={...swap.targetShift,swapped:true,swapPending:false,swapFromGroup:swap.targetGroup};return{...emp,shifts:sh};}
+          if(emp.name===swap.targetName&&g===swap.targetGroup){const sh=[...emp.shifts];sh[swap.shiftIdx]={...swap.requesterShift,swapped:true,swapPending:false,swapFromGroup:swap.requesterGroup};return{...emp,shifts:sh};}
+          return emp;
+        });});return updated;
+      });saveToGas({liveWeeks:next});return next;});
+      addAudit(adminName1||"Admin",`Approved swap: ${swap.requesterName} ↔ ${swap.targetName} on ${swap.date}`);
+      const next=prev.map(s=>s.id===sid?{...s,status:"APPROVED",approvedTs:nowTs()}:s);saveToGas({swapRequests:next});return next;
+    });
+  },[addAudit,adminName1,saveToGas]);
+
+  const denySwap=useCallback(sid=>{
+    setSwapRequests(prev=>{
+      const swap=prev.find(s=>s.id===sid);if(!swap)return prev;
+      setLiveWeeks(lw=>{const next=lw.map(week=>{
+        if(week.id!==swap.weekId)return week;
+        const updated={...week,groups:{...week.groups}};
+        GROUPS.forEach(g=>{updated.groups[g]=(updated.groups[g]||[]).map(emp=>{
+          if((emp.name===swap.requesterName&&g===swap.requesterGroup)||(emp.name===swap.targetName&&g===swap.targetGroup)){const sh=[...emp.shifts];sh[swap.shiftIdx]={...sh[swap.shiftIdx],swapPending:false};return{...emp,shifts:sh};}return emp;
+        });});return updated;
+      });saveToGas({liveWeeks:next});return next;});
+      addAudit("Admin",`Denied swap: ${swap.requesterName} ↔ ${swap.targetName}`);
+      const next=prev.map(s=>s.id===sid?{...s,status:"DENIED",approvedTs:nowTs()}:s);saveToGas({swapRequests:next});return next;
+    });
+  },[addAudit,saveToGas]);
+
+  const handleSwapPin=pin=>{const m=staffPins.find(s=>s.pin===pin);if(m){setSwapRequesterInfo({name:m.name,group:m.group});setCurrentUser({name:m.name,group:m.group});setSwapPinModal(false);addAudit(m.name,"Authenticated for shift swap","login");}};
+  const handleStaffPinUnlock=(name,group)=>{grantStaffUnlock(name,group);setCurrentUser({name,group});addAudit(name,"Staff PIN login","login");};
+
+  /* ── Loading / error screens ─────────────────────────────────────── */
+  if(!access){
+    if(gasLoading) return(
+      <div style={{minHeight:"100vh",background:"#0f172a",display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:16}}>
+        <div style={{width:32,height:32,borderRadius:8,background:"linear-gradient(135deg,#3b82f6,#06b6d4)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20}}>🐾</div>
+        <div style={{fontSize:12,color:"#60a5fa",fontWeight:600}}>Loading schedule…</div>
+        <div style={{fontSize:10,color:"#475569"}}>Connecting to Google Sheets</div>
+      </div>
+    );
+    if(gasError) return(
+      <div style={{minHeight:"100vh",background:"#0f172a",display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:12}}>
+        <div style={{fontSize:14,color:"#f87171",fontWeight:700}}>⚠ Connection Error</div>
+        <div style={{fontSize:10,color:"#94a3b8",maxWidth:300,textAlign:"center"}}>{gasError}</div>
+        <button onClick={()=>{setGasError("");}} style={{padding:"8px 18px",borderRadius:8,border:"1px solid #334155",background:"none",color:"#60a5fa",fontSize:10,cursor:"pointer"}}>Try again</button>
+      </div>
+    );
+    return <LandingLock onSignedIn={handleSignedIn}/>;
+  }
+
+  const VISIBLE=[{id:"main",l:"SCHEDULE"},{id:"timeoff",l:"📅 TIME OFF"},{id:"messages",l:"💬 Messages"}];
+  const LOCKED=[{id:"master",l:"⚙ MASTER"},{id:"past-sched",l:"📦 Past Schedules"},{id:"stats",l:"📊 STATS & REQUESTS"},{id:"admin",l:"⚙️ ADMIN"}];
+  const openPwd=()=>{setPwdModal(true);setPwdInput("");setPwdErr(false);};
+  const submitPwd=()=>{
+    const aname=pwdInput===pwd2&&adminName2?adminName2:adminName1;
+    if(pwdInput===pwd||pwdInput===pwd2){setIsUnlocked(true);setPwdModal(false);lastAct.current=Date.now();addAudit(aname||"Admin","Admin unlock","login");}
+    else if(adminPin1&&adminPin1.length>=3&&pwdInput===adminPin1){setIsUnlocked(true);setPwdModal(false);lastAct.current=Date.now();addAudit(adminName1||"Admin","Admin unlock via PIN","login");}
+    else if(adminPin2&&adminPin2.length>=3&&pwdInput===adminPin2){setIsUnlocked(true);setPwdModal(false);lastAct.current=Date.now();addAudit(adminName2||"Admin 2","Admin unlock via PIN","login");}
+    else setPwdErr(true);
+  };
+  const lockNow=()=>{setIsUnlocked(false);if(LOCKED.map(t=>t.id).includes(page))setPage("main");};
+  const lockAll=()=>{setAccess(null);setIsUnlocked(false);setPage("main");setCurrentUser(null);setSwapRequesterInfo(null);setGasToken(null);};
+
+  return(
+    <div style={{minHeight:"100vh",background:BG,color:"#1e293b"}} onContextMenu={e=>e.preventDefault()}>
+      <style>{CSS}</style>
+
+      {syncing&&<div style={{position:"fixed",bottom:28,right:12,zIndex:9999,background:"#1e293b",color:"#60a5fa",fontSize:8,padding:"3px 10px",borderRadius:20,fontWeight:600,boxShadow:"0 2px 8px rgba(0,0,0,0.3)"}}>⟳ Saving…</div>}
+
+      {staffPinModal&&<StaffPinModal empName={staffPinModal.name} group={staffPinModal.group} staffPins={staffPins} onUnlock={()=>handleStaffPinUnlock(staffPinModal.name,staffPinModal.group)} onClose={()=>setStaffPinModal(null)}/>}
+
+      {swapPinModal&&(
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:9991}}>
+          <div data-ov style={{background:"#fff",borderRadius:12,padding:24,width:290}}>
+            <div style={{fontWeight:700,fontSize:13,color:"#1e293b",marginBottom:12}}>🔄 Swap Mode</div>
+            <div style={{fontSize:9,color:"#64748b",marginBottom:14}}>Enter your PIN to enable shift swap requests on your row.</div>
+            <PinPad validPins={staffPins.filter(s=>s.pin&&s.pin.length>=3).map(s=>s.pin)} onMatch={handleSwapPin} onCancel={()=>setSwapPinModal(false)}/>
+          </div>
+        </div>
+      )}
+
+      {swapModal&&<SwapRequestModal {...swapModal} liveWeeks={liveWeeks} staffPins={staffPins} addAudit={addAudit}
+        onSubmit={req=>{
+          const id=uid();
+          setLiveWeeks(prev=>{const next=prev.map(week=>{
+            if(week.id!==req.weekId)return week;
+            const updated={...week,groups:{...week.groups}};
+            GROUPS.forEach(g=>{updated.groups[g]=(updated.groups[g]||[]).map(emp=>{
+              if((emp.name===req.requesterName&&g===req.requesterGroup)||(emp.name===req.targetName&&g===req.targetGroup)){const sh=[...emp.shifts];sh[req.shiftIdx]={...sh[req.shiftIdx],swapPending:true};return{...emp,shifts:sh};}return emp;
+            });});return updated;
+          });saveToGas({liveWeeks:next});return next;});
+          setSwapRequests(prev=>{const next=[{...req,id,status:"PENDING"},...prev];saveToGas({swapRequests:next});return next;});
+          setMessages(prev=>{const next=[{id:uid(),from:"SYSTEM",group:req.requesterGroup,body:`🔄 Swap request: ${req.requesterName} (${req.requesterShift?.t||"?"}) ↔ ${req.targetName} (${req.targetShift?.t||"?"}) on ${req.date}${req.note?"\n\nNote: "+req.note:""}`,ts:req.ts,read:false,year:2026,isSwap:true},...prev];saveToGas({messages:next});return next;});
+          addAudit(req.requesterName,`Swap request → ${req.targetName} on ${req.date}`,"action");
+          setSwapRequesterInfo(null);
+        }}
+        onClose={()=>setSwapModal(null)}/>}
+
+      {pwdModal&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:9999}}>
+        <div data-ov style={{background:"#fff",borderRadius:14,padding:28,width:300,boxShadow:"0 24px 64px rgba(0,0,0,0.2)"}}>
+          <div style={{fontSize:13,fontWeight:800,color:"#1e293b",marginBottom:4}}>🔐 Admin Unlock</div>
+          <input autoFocus type="password" value={pwdInput} onChange={e=>{setPwdInput(e.target.value);setPwdErr(false);}} onKeyDown={e=>e.key==="Enter"&&submitPwd()} placeholder="Password" style={{width:"100%",background:"#f8fafc",border:`1px solid ${pwdErr?"#ef4444":"#e2e8f0"}`,borderRadius:8,padding:"9px 12px",color:"#1e293b",fontSize:12,outline:"none",boxSizing:"border-box",marginBottom:6}}/>
+          {pwdErr&&<div style={{fontSize:9,color:"#ef4444",marginBottom:8}}>Incorrect</div>}
+          <div style={{display:"flex",gap:8,marginTop:8}}><Btn onClick={submitPwd} variant="primary" style={{flex:1,padding:"9px",fontSize:11}}>UNLOCK</Btn><Btn onClick={()=>setPwdModal(false)} style={{padding:"9px 14px",fontSize:11}}>Cancel</Btn></div>
+        </div>
+      </div>}
+
+      {picker&&<div data-ov style={{position:"fixed",left:picker.x,top:picker.y,zIndex:8888,background:"#fff",border:"1px solid #e2e8f0",borderRadius:10,padding:10,boxShadow:"0 8px 32px rgba(0,0,0,0.15)",minWidth:226}}>
+        <div style={{fontSize:8,color:"#94a3b8",marginBottom:7,fontWeight:600}}>{picker.dayIdx===5?"SATURDAY":"SELECT SHIFT"}</div>
+        {(picker.dayIdx===5?SA_PRE:WD_PRE).map((row,ri)=><div key={ri} style={{display:"flex",gap:3,marginBottom:3}}>{row.map(t=><button key={t} onClick={()=>applyPreset(t)} style={{flex:1,padding:"6px 2px",borderRadius:5,border:"1px solid #e2e8f0",background:"#f8fafc",color:"#1e293b",fontSize:9,cursor:"pointer",fontWeight:600}} onMouseEnter={e=>e.currentTarget.style.background="#eff6ff"} onMouseLeave={e=>e.currentTarget.style.background="#f8fafc"}>{t}</button>)}</div>)}
+        <CustomInput onApply={applyPreset}/>
+        <div style={{borderTop:"1px solid #f1f5f9",paddingTop:5,marginTop:5}}>
+          {["VAC","OFF","CLOSED"].map(st=><button key={st} onClick={()=>{applyPreset("");ctxAct===undefined?null:null;const{weekId:wid,group:g,empIdx:ei,shiftIdx:si,isMaster}=picker;const patch={st,t:"",h:0,rc:null,customLabel:null};if(isMaster)setMasterWeeks(prev=>{const next=prev.map(w=>{if(w.id!==wid)return w;return{...w,groups:{...w.groups,[g]:w.groups[g].map((emp,i)=>i!==ei?emp:{...emp,shifts:emp.shifts.map((s,j)=>j!==si?s:{...s,...patch})})}}; });saveToGas({masterWeeks:next});return next;});else updLive(wid,g,ei,si,patch);setPicker(null);}} style={{display:"block",width:"100%",textAlign:"left",padding:"5px 8px",background:"none",border:"none",color:"#64748b",fontSize:9,cursor:"pointer",borderRadius:5}} onMouseEnter={e=>e.currentTarget.style.background="#f1f5f9"} onMouseLeave={e=>e.currentTarget.style.background="none"}>{st==="VAC"?"🌴 Vacation":st==="OFF"?"💤 Day Off":"🔒 Closed"}</button>)}
+        </div>
+      </div>}
+
+      {ctx&&<div data-ov style={{position:"fixed",left:ctx.x,top:ctx.y,zIndex:8889,background:"#fff",border:"1px solid #e2e8f0",borderRadius:10,padding:"8px",boxShadow:"0 8px 32px rgba(0,0,0,0.15)",minWidth:190}}>
+        <div style={{borderBottom:"1px solid #f1f5f9",padding:"4px 8px 8px"}}>
+          <div style={{fontSize:8,color:"#94a3b8",fontWeight:600,marginBottom:5}}>STATUS</div>
+          <div style={{display:"flex",gap:3,flexWrap:"wrap"}}>{["VAC","OFF","CLOSED"].map(st=><button key={st} onClick={()=>ctxAct(st)} style={{padding:"4px 8px",borderRadius:5,border:"1px solid #e2e8f0",background:"none",color:"#64748b",fontSize:9,cursor:"pointer"}} onMouseEnter={e=>e.currentTarget.style.background="#f1f5f9"} onMouseLeave={e=>e.currentTarget.style.background="none"}>{st}</button>)}</div>
+        </div>
+        <div style={{borderBottom:"1px solid #f1f5f9",padding:"6px 8px"}}>
+          <div style={{fontSize:8,color:"#94a3b8",fontWeight:600,marginBottom:5}}>CUSTOM DAY ⭐</div>
+          <div style={{display:"flex",gap:4,alignItems:"center",marginBottom:4}}>
+            <input value={ctxCustomLabel} onChange={e=>setCtxCustomLabel(e.target.value)} placeholder={customDayLabels[0]||"Custom"} style={{flex:1,background:"#f8fafc",border:"1px solid #c084fc",borderRadius:4,color:"#581c87",fontSize:9,padding:"3px 6px",outline:"none"}}/>
+            <Btn onClick={()=>ctxAct("CUSTOM")} style={{fontSize:8,background:"#f0e6ff",border:"1px solid #c084fc",color:"#581c87"}}>Set</Btn>
+          </div>
+        </div>
+        <div style={{borderBottom:"1px solid #f1f5f9",padding:"6px 8px"}}>
+          <div style={{fontSize:8,color:"#94a3b8",fontWeight:600,marginBottom:5}}>SICK CALL</div>
+          <div style={{display:"flex",alignItems:"center",gap:5}}>
+            <span style={{fontSize:10,color:"#ef4444"}}>🤒</span>
+            <input value={ctxSick} onChange={e=>setCtxSick(e.target.value)} type="number" min="0" max="12" step="0.5" style={{width:38,background:"#fff",border:"1px solid #f87171",borderRadius:4,color:"#991b1b",fontSize:11,padding:"3px 5px",outline:"none",textAlign:"center"}}/>
+            <span style={{fontSize:8,color:"#94a3b8"}}>hrs</span>
+            <Btn onClick={()=>ctxAct("SICK")} variant="danger" style={{marginLeft:"auto",fontSize:9}}>APPLY</Btn>
+          </div>
+        </div>
+        <div style={{borderTop:"1px solid #f1f5f9",margin:"4px 0 0",padding:"6px 8px 4px"}}>
+          <div style={{fontSize:8,color:"#94a3b8",fontWeight:600,marginBottom:5}}>ROLE COLOUR</div>
+          <div style={{display:"flex",gap:4,marginBottom:6}}>{GROUPS.map(g=>{const gc=C[g]||DEF[g];const active=ctxShift?.rc===g;return <button key={g} onClick={()=>ctxAct(`RC_${g}`)} style={{flex:1,padding:"4px 2px",borderRadius:5,border:`1px solid ${active?gc.cbo:"#e2e8f0"}`,background:active?gc.cbg:"none",color:active?gc.htx:"#64748b",fontSize:9,cursor:"pointer",fontWeight:active?700:400}}>{g}</button>;})} </div>
+          <div style={{fontSize:8,color:"#94a3b8",fontWeight:600,marginBottom:5}}>TAGS</div>
+          {Object.entries(TAG_CFG).map(([k,{l,c,bg}])=>{const active=ctxShift?.tg?.includes(k);return <button key={k} onClick={()=>ctxAct(k)} style={{display:"block",width:"100%",textAlign:"left",padding:"6px 10px",marginBottom:2,background:active?bg:"none",border:`1px solid ${active?c+"55":"transparent"}`,borderRadius:5,color:c,fontSize:10,cursor:"pointer",fontWeight:active?700:400}} onMouseEnter={e=>{if(!active)e.currentTarget.style.background=bg;}} onMouseLeave={e=>{if(!active)e.currentTarget.style.background="none";}}>{l}{active?" ✓":""}</button>;})}
+        </div>
+        <div style={{borderTop:"1px solid #f1f5f9",paddingTop:5,marginTop:4}}>
+          <button onClick={()=>ctxAct("CLEAR")} style={{display:"block",width:"100%",textAlign:"left",padding:"6px 10px",background:"none",border:"none",color:"#94a3b8",fontSize:9,cursor:"pointer",borderRadius:5}} onMouseEnter={e=>e.currentTarget.style.background="#f1f5f9"} onMouseLeave={e=>e.currentTarget.style.background="none"}>✕ Clear cell</button>
+        </div>
+      </div>}
+
+      {printOpen&&<PrintModal weeks={liveWeeks} isAdmin={isUnlocked} onClose={()=>setPrintOpen(false)} customDayLabels={customDayLabels}/>}
+
+      {/* NAV */}
+      <div style={{position:"sticky",top:0,zIndex:500,background:NAV,display:"flex",alignItems:"center",padding:"0 14px",boxShadow:"0 2px 8px rgba(0,0,0,0.15)",height:50,overflowX:"auto"}}>
+        <div style={{width:26,height:26,borderRadius:7,background:"linear-gradient(135deg,#3b82f6,#06b6d4)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,marginRight:10,flexShrink:0}}>🐾</div>
+        {currentUser&&!isUnlocked&&<div style={{fontSize:9,color:"#60a5fa",fontWeight:700,marginRight:8,flexShrink:0,whiteSpace:"nowrap",background:"#1e3a5f",padding:"2px 8px",borderRadius:10}}>👤 {currentUser.name}</div>}
+        {VISIBLE.map(t=><button key={t.id} onClick={()=>setPage(t.id)} style={{height:50,padding:"0 11px",border:"none",background:"none",cursor:"pointer",fontWeight:700,fontSize:10,color:page===t.id?"#60a5fa":"#94a3b8",borderBottom:page===t.id?"2px solid #3b82f6":"2px solid transparent",flexShrink:0,whiteSpace:"nowrap",position:"relative"}}>
+          {t.l}
+          {t.id==="timeoff"&&pendingCount>0&&<span style={{position:"absolute",top:8,right:2,background:"#ef4444",color:"#fff",borderRadius:10,fontSize:7,padding:"1px 4px",fontWeight:700}}>{pendingCount}</span>}
+          {t.id==="messages"&&(unreadMsgCount>0||pendingSwapCount>0)&&<span style={{position:"absolute",top:8,right:2,background:"#ef4444",color:"#fff",borderRadius:10,fontSize:7,padding:"1px 4px",fontWeight:700}}>{unreadMsgCount||pendingSwapCount}</span>}
+        </button>)}
+        {page==="main"&&!isUnlocked&&(
+          swapRequesterInfo
+            ?<button onClick={()=>setSwapRequesterInfo(null)} style={{height:32,padding:"0 10px",margin:"0 4px",border:"1px solid #a78bfa",background:"#ede9fe",cursor:"pointer",fontWeight:700,fontSize:9,color:"#4c1d95",borderRadius:7,flexShrink:0,whiteSpace:"nowrap"}}>🔄 {swapRequesterInfo.name} · Cancel</button>
+            :<button onClick={()=>setSwapPinModal(true)} style={{height:32,padding:"0 10px",margin:"0 4px",border:"1px solid #334155",background:"none",cursor:"pointer",fontWeight:600,fontSize:9,color:"#94a3b8",borderRadius:7,flexShrink:0,whiteSpace:"nowrap"}}>🔄 Request Swap</button>
+        )}
+        {isUnlocked&&<div style={{width:1,height:24,background:"#334155",margin:"0 3px",flexShrink:0}}/>}
+        {isUnlocked&&LOCKED.map(t=><button key={t.id} onClick={()=>setPage(t.id)} style={{height:50,padding:"0 11px",border:"none",background:"none",cursor:"pointer",fontWeight:700,fontSize:10,color:page===t.id?"#60a5fa":"#94a3b8",borderBottom:page===t.id?"2px solid #3b82f6":"2px solid transparent",flexShrink:0,whiteSpace:"nowrap"}}>{t.l}</button>)}
+        <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:6,flexShrink:0}}>
+          {(()=>{const all=liveWeeks.flatMap(w=>Object.values(w.groups).flat());const vac=all.filter(e=>e.shifts.some(s=>s.st==="VAC")).length;const sick=all.filter(e=>e.shifts.some(s=>s.st==="SICK")).length;return[vac>0&&<span key="v" style={{padding:"3px 7px",borderRadius:20,background:"#78350f",border:"1px solid #d97706",fontSize:8,color:"#fbbf24",fontWeight:600,whiteSpace:"nowrap"}}>{vac} VAC</span>,sick>0&&<span key="s" style={{padding:"3px 7px",borderRadius:20,background:"#7f1d1d",border:"1px solid #ef4444",fontSize:8,color:"#fca5a5",fontWeight:600,whiteSpace:"nowrap"}}>{sick} SICK</span>];})()}
+          {undoStack&&isUnlocked&&<Btn onClick={doUndo} style={{fontSize:8,border:"1px solid #a78bfa",color:"#4c1d95",background:"#ede9fe"}}>↩ Undo</Btn>}
+          <Btn onClick={()=>setPrintOpen(true)} style={{fontSize:8,border:"1px solid #334155",color:"#64748b",background:"none"}}>🖨</Btn>
+          {isUnlocked?<Btn onClick={lockNow} style={{fontSize:8,border:"1px solid #3b82f6",background:"#1e40af",color:"#93c5fd",fontWeight:700}}>🔓 Lock Admin</Btn>:<Btn onClick={openPwd} style={{fontSize:8,border:"1px solid #f59e0b",background:"#78350f",color:"#fbbf24",fontWeight:700}}>🔒 Admin</Btn>}
+          <Btn onClick={lockAll} style={{fontSize:8,border:"1px solid #334155",color:"#94a3b8",background:"none"}}>⏏ Sign Out</Btn>
+        </div>
+      </div>
+
+      {/* CONTENT */}
+      <div style={{padding:"16px 18px 80px"}}>
+        {page==="main"&&<HorizSchedule weeks={liveWeeks} isAdmin={isUnlocked} readonly={false} C={C} staffPins={staffPins} staffUnlocked={staffUnlocked} swapRequesterInfo={swapRequesterInfo} swapRequests={swapRequests} customDayLabels={customDayLabels}
+          onTap={onTapLive} onLong={onLongLive} onCtxMenu={onCtxLive}
+          onHrs={(wid,g,ei,si,h)=>updLive(wid,g,ei,si,{h})} onSickHrs={(wid,g,ei,si,sh)=>updLive(wid,g,ei,si,{sh})}
+          onArchive={archiveWeek} onApprove={appReqLive} onDeny={denyReqLive}
+          onApproveSwap={approveSwap} onDenySwap={denySwap}
+          onSwapRequest={(wid,grp,ei,si,shift,date)=>setSwapModal({requesterName:swapRequesterInfo.name,requesterGroup:swapRequesterInfo.group,requesterShift:shift,requesterDate:date,weekId:wid,shiftIdx:si})}/>}
+        {page==="timeoff"&&<TimeOffPage requests={requests} setRequests={r=>{setRequests(r);saveToGas({requests:r});}} masterWeeks={masterWeeks} setMasterWeeks={m=>{setMasterWeeks(m);saveToGas({masterWeeks:m});}} liveWeeks={liveWeeks} lockedTOWeeks={lockedTOWeeks} setLockedTOWeeks={setLockedTOWeeks} isUnlocked={isUnlocked} staffUnlocked={staffUnlocked} staffPins={staffPins} onRequestStaffPin={onRequestStaffPin} pwd={pwd} pwd2={pwd2} C={C} availability={availability} setAvailability={setAvailability}/>}
+        {page==="messages"&&<MessagesPage messages={messages} setMessages={m=>{setMessages(m);saveToGas({messages:m});}} swapRequests={swapRequests} setSwapRequests={s=>{setSwapRequests(s);saveToGas({swapRequests:s});}} staffPins={staffPins} isUnlocked={isUnlocked} liveWeeks={liveWeeks} setLiveWeeks={l=>{setLiveWeeks(l);saveToGas({liveWeeks:l});}} addAudit={addAudit} currentUser={currentUser} onApproveSwap={approveSwap} onDenySwap={denySwap}/>}
+        {page==="master"&&isUnlocked&&<MasterPage masterWeeks={masterWeeks} setMasterWeeks={m=>{setMasterWeeks(m);saveToGas({masterWeeks:m});}} liveWeeks={liveWeeks} setLiveWeeks={l=>{setLiveWeeks(l);saveToGas({liveWeeks:l});}} masterArchived={masterArchived} setMasterArchived={m=>{setMasterArchived(m);saveToGas({masterArchived:m});}} liveArchived={liveArchived} isUnlocked={isUnlocked} C={C} onSC={onSC} onRC={onRC} requests={requests} setRequests={r=>{setRequests(r);saveToGas({requests:r});}} addAudit={addAudit} pwd={pwd} pwd2={pwd2} pushUndo={pushUndo} customDayLabels={customDayLabels}/>}
+        {page==="past-sched"&&isUnlocked&&<PastSchedules archived={liveArchived} onUnarchive={unarchiveWeek} isUnlocked={isUnlocked} C={C}/>}
+        {page==="stats"&&isUnlocked&&<StatsAndRequestsPage requests={requests} weeks={liveWeeks} liveArchived={liveArchived} masterArchived={masterArchived} C={C}/>}
+        {page==="admin"&&isUnlocked&&<AdminPage C={C} setC={c=>{setC(c);saveToGas({settings:{colours:c}});}} pwd={pwd} setPwd={p=>{setPwd(p);saveToGas({settings:{adminPwd:p}});}} pwd2={pwd2} setPwd2={p=>{setPwd2(p);saveToGas({settings:{adminPwd2:p}});}} adminName1={adminName1} setAdminName1={n=>{setAdminName1(n);saveToGas({settings:{adminName1:n}});}} adminName2={adminName2} setAdminName2={n=>{setAdminName2(n);saveToGas({settings:{adminName2:n}});}} adminPin1={adminPin1} setAdminPin1={p=>{setAdminPin1(p);saveToGas({settings:{adminPin1:p}});}} adminPin2={adminPin2} setAdminPin2={p=>{setAdminPin2(p);saveToGas({settings:{adminPin2:p}});}} staffPins={staffPins} setStaffPins={s=>{setStaffPins(s);saveToGas({staffPins:s});}} viewerPins={viewerPins} setViewerPins={setViewerPins} lockMs={lockMs} setLockMs={m=>{setLockMs(m);saveToGas({settings:{lockMs:String(m)}});}} auditLog={auditLog} liveWeeks={liveWeeks} masterWeeks={masterWeeks} liveArchived={liveArchived} masterArchived={masterArchived} requests={requests} messages={messages} swapRequests={swapRequests} onClearAll={onClearAll} pwd_for_clear={[pwd,pwd2]} deletedEmps={deletedEmps} customDayLabels={customDayLabels} setCustomDayLabels={l=>{setCustomDayLabels(l);saveToGas({settings:{customDayLabels:l}});}} setLiveWeeks={l=>{setLiveWeeks(l);saveToGas({liveWeeks:l});}} setLiveArchived={l=>{setLiveArchived(l);saveToGas({liveArchived:l});}} setMasterWeeks={m=>{setMasterWeeks(m);saveToGas({masterWeeks:m});}} setMasterArchived={m=>{setMasterArchived(m);saveToGas({masterArchived:m});}}/>}
+        {LOCKED.map(t=>t.id).includes(page)&&!isUnlocked&&<div style={{textAlign:"center",marginTop:100}}><div style={{fontSize:48,opacity:0.15,marginBottom:16}}>🔐</div><div style={{fontWeight:700,fontSize:16,color:"#94a3b8",marginBottom:12}}>Admin unlock required</div><Btn onClick={openPwd} style={{fontSize:11,border:"1px solid #f59e0b",color:"#b45309",background:"#fef3c7"}}>🔒 Unlock Now</Btn></div>}
+      </div>
+
+      <div style={{position:"fixed",bottom:0,left:0,right:0,height:24,background:NAV,display:"flex",alignItems:"center",padding:"0 16px",boxShadow:"0 -1px 4px rgba(0,0,0,0.1)"}}>
+        <span style={{fontSize:7,color:"#475569"}}>HPVH v16 · {isUnlocked?`🔓 ADMIN – auto-locks ${LOCK_OPTIONS.find(o=>o.ms===lockMs)?.label||"5min"}`:"🔒 View mode"}</span>
+        <span style={{marginLeft:"auto",fontSize:7,color:"#475569"}}>{liveArchived.length} archived · {liveWeeks.length} live · {pendingCount} pending · {unreadMsgCount+pendingSwapCount} inbox</span>
+      </div>
+    </div>
+  );
+}
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(React.createElement(App));
+    document.getElementById('loading-screen').style.display = 'none';
+  </script>
+
+</body>
+</html>
