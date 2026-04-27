@@ -839,27 +839,28 @@ function MasterPage({masterWeeks,setMasterWeeks,liveWeeks,setLiveWeeks,masterArc
     const dates=last?nextDates(last.dates):Array(7).fill("").map((_,i)=>{const d=new Date();d.setDate(d.getDate()+i);return`${d.getDate()}-${MON[d.getMonth()]}`;});
     const ng={};const refWeek=masterWeeks.slice(-1)[0]||masterArchived.slice(-1)[0];
     GROUPS.forEach(g=>{ng[g]=(refWeek?.groups[g]||[]).map(e=>({...e,id:uid(),shifts:dates.map((_,i)=>i===6?mkCl():mk(""))}));});
-    setMasterWeeks(prev=>sortWeeks([...prev,{id:uid(),label:wkLabel(dates),dates,published:false,groups:ng}]));
+    const next=sortWeeks([...masterWeeks,{id:uid(),label:wkLabel(dates),dates,published:false,groups:ng}]);
+    setMasterWeeks(next);
+    saveToGas({masterWeeks:next});
   };
 
-  const updM=(wid,g,ei,si,patch)=>setMasterWeeks(prev=>prev.map(w=>{if(w.id!==wid)return w;return{...w,groups:{...w.groups,[g]:w.groups[g].map((emp,i)=>i!==ei?emp:{...emp,shifts:emp.shifts.map((s,j)=>j!==si?s:{...s,...patch})})}};}));
+  const updM=(wid,g,ei,si,patch)=>{const next=masterWeeks.map(w=>{if(w.id!==wid)return w;return{...w,groups:{...w.groups,[g]:w.groups[g].map((emp,i)=>i!==ei?emp:{...emp,shifts:emp.shifts.map((s,j)=>j!==si?s:{...s,...patch})})}}};});setMasterWeeks(next);saveToGas({masterWeeks:next});};
   const appReqM=(wid,g,ei,si)=>{const s=masterWeeks.find(w=>w.id===wid)?.groups[g]?.[ei]?.shifts[si];updM(wid,g,ei,si,{reqSt:"APPROVED"});if(s?.reqId)setRequests(prev=>prev.map(r=>r.id===s.reqId?{...r,status:"APPROVED"}:r));};
   const denyReqM=(wid,g,ei,si)=>{const s=masterWeeks.find(w=>w.id===wid)?.groups[g]?.[ei]?.shifts[si];updM(wid,g,ei,si,{t:"",h:0,st:null,reqSt:"DENIED",reqId:null});if(s?.reqId)setRequests(prev=>prev.map(r=>r.id===s.reqId?{...r,status:"DENIED"}:r));};
-  const moveEmp=(wid,g,ei,dir)=>{setMasterWeeks(prev=>prev.map(w=>{if(w.id!==wid)return w;const arr=[...(w.groups[g]||[])];const ti=ei+dir;if(ti<0||ti>=arr.length)return w;[arr[ei],arr[ti]]=[arr[ti],arr[ei]];return{...w,groups:{...w.groups,[g]:arr}};}));};
-  const renameEmp=(wid,g,ei,name)=>{setMasterWeeks(prev=>prev.map(w=>w.id!==wid?w:{...w,groups:{...w.groups,[g]:w.groups[g].map((e,i)=>i!==ei?e:{...e,name})}}));};
+  const moveEmp=(wid,g,ei,dir)=>{const next=masterWeeks.map(w=>{if(w.id!==wid)return w;const arr=[...(w.groups[g]||[])];const ti=ei+dir;if(ti<0||ti>=arr.length)return w;[arr[ei],arr[ti]]=[arr[ti],arr[ei]];return{...w,groups:{...w.groups,[g]:arr}};});setMasterWeeks(next);saveToGas({masterWeeks:next});};
+  const renameEmp=(wid,g,ei,name)=>{const next=masterWeeks.map(w=>w.id!==wid?w:{...w,groups:{...w.groups,[g]:w.groups[g].map((e,i)=>i!==ei?e:{...e,name})}});setMasterWeeks(next);saveToGas({masterWeeks:next});};
 
   const confirmAddEmp=()=>{
     if(!newEmpName.trim()||!newEmpModal)return;
     const name=newEmpName.trim();const{weekId,grp}=newEmpModal;
     const sorted2=sortWeeks(masterWeeks);const fi=sorted2.findIndex(w=>w.id===weekId);
-    setMasterWeeks(prev=>{
-      const s2=sortWeeks(prev);
-      return prev.map(w=>{
-        const wi=s2.findIndex(x=>x.id===w.id);if(wi<fi)return w;
-        const alreadyHas=(w.groups[grp]||[]).some(e=>e.name===name);if(alreadyHas)return w;
-        return{...w,groups:{...w.groups,[grp]:[...(w.groups[grp]||[]),{id:uid(),name,shifts:w.dates.map((_,i)=>i===6?mkCl():mk(""))}]}};
-      });
+    const next=masterWeeks.map(w=>{
+      const wi=sorted2.findIndex(x=>x.id===w.id);if(wi<fi)return w;
+      const alreadyHas=(w.groups[grp]||[]).some(e=>e.name===name);if(alreadyHas)return w;
+      return{...w,groups:{...w.groups,[grp]:[...(w.groups[grp]||[]),{id:uid(),name,shifts:w.dates.map((_,i)=>i===6?mkCl():mk(""))}]}};
     });
+    setMasterWeeks(next);
+    saveToGas({masterWeeks:next});
     pushUndo&&pushUndo({type:"addEmp",name,grp,weekId});
     addAudit("Admin",`Added ${name} to ${grp} from week ${weekId}`);
     setNewEmpModal(null);setNewEmpName("");
@@ -870,13 +871,13 @@ function MasterPage({masterWeeks,setMasterWeeks,liveWeeks,setLiveWeeks,masterArc
     const{weekId,group:grp,name}=deleteConfirm;
     const snapshot=deepClone(masterWeeks);
     pushUndo&&pushUndo({type:"delEmp",snapshot});
-    setMasterWeeks(prev=>{
-      const s2=sortWeeks(prev);const fi=s2.findIndex(w=>w.id===weekId);
-      return prev.map(w=>{
-        const wi=s2.findIndex(x=>x.id===w.id);if(wi<fi)return w;
-        return{...w,groups:{...w.groups,[grp]:(w.groups[grp]||[]).filter(e=>e.name!==name)}};
-      });
+    const sorted2=sortWeeks(masterWeeks);const fi=sorted2.findIndex(w=>w.id===weekId);
+    const next=masterWeeks.map(w=>{
+      const wi=sorted2.findIndex(x=>x.id===w.id);if(wi<fi)return w;
+      return{...w,groups:{...w.groups,[grp]:(w.groups[grp]||[]).filter(e=>e.name!==name)}};
     });
+    setMasterWeeks(next);
+    saveToGas({masterWeeks:next});
     addAudit("Admin",`Deleted ${name} from ${grp} from week ${weekId} onward`);
     setDeleteConfirm(null);
   };
