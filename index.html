@@ -1871,27 +1871,38 @@ function App(){
     }
   },[]);
 
-  /* ── GAS save helper — debounced, called after every state change ─── */
+  /* ── GAS save helper — writes to Sheet and applies confirmed state back ─── */
   const saveToGas = useCallback(async (changes) => {
     if (!gasToken) return;
     setSyncing(true);
     try {
-      await gasSaveSchedule(gasToken, changes);
+      const res = await gasSaveSchedule(gasToken, changes);
+      // Apply the server-confirmed state so local UI matches Sheet truth,
+      // and advance lastModTs so the next poll sees no delta and skips fetch.
+      if (res?.ok && res?.data) {
+        applySchedData(res.data);
+        if (res.data.lastModified) setLastModTs(res.data.lastModified);
+      }
     } catch(err) {
-      // Non-fatal — data is still in memory, will retry on next save
       console.warn("GAS save failed:", err.message);
     } finally {
       setSyncing(false);
     }
-  },[gasToken]);
+  },[gasToken, applySchedData]);
 
   /* ── Polling — check for remote changes every 12 seconds ─────────── */
+  // lastModTsRef lets the interval always read the latest value without
+  // being in the dependency array — prevents the interval from tearing
+  // down and rebuilding (and firing stale fetches) on every save.
+  const lastModTsRef = useRef(0);
+  useEffect(()=>{ lastModTsRef.current = lastModTs; }, [lastModTs]);
+
   useEffect(()=>{
     if (!gasToken || !access) return;
     const interval = setInterval(async ()=>{
       try {
         const res = await gasGetLastMod(gasToken);
-        if (res.ts && res.ts > lastModTs) {
+        if (res.ts && res.ts > lastModTsRef.current) {
           setLastModTs(res.ts);
           const sched = await gasGetSchedule(gasToken);
           applySchedData(sched.data);
@@ -1901,7 +1912,7 @@ function App(){
       }
     }, POLL_INTERVAL_MS);
     return ()=>clearInterval(interval);
-  },[gasToken,access,lastModTs]);
+  },[gasToken,access]);
 
   const addAudit=useCallback((actor,description,type="action",context="")=>{
     const entry={id:uid(),actor,description,type,context,ts:nowTs()};
