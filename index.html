@@ -841,14 +841,13 @@ function MasterPage({masterWeeks,setMasterWeeks,liveWeeks,setLiveWeeks,masterArc
     GROUPS.forEach(g=>{ng[g]=(refWeek?.groups[g]||[]).map(e=>({...e,id:uid(),shifts:dates.map((_,i)=>i===6?mkCl():mk(""))}));});
     const next=sortWeeks([...masterWeeks,{id:uid(),label:wkLabel(dates),dates,published:false,groups:ng}]);
     setMasterWeeks(next);
-    saveToGas({masterWeeks:next});
   };
 
-  const updM=(wid,g,ei,si,patch)=>{const next=masterWeeks.map(w=>{if(w.id!==wid)return w;return{...w,groups:{...w.groups,[g]:w.groups[g].map((emp,i)=>i!==ei?emp:{...emp,shifts:emp.shifts.map((s,j)=>j!==si?s:{...s,...patch})})}}};});setMasterWeeks(next);saveToGas({masterWeeks:next});};
+  const updM=(wid,g,ei,si,patch)=>{const next=masterWeeks.map(w=>{if(w.id!==wid)return w;return{...w,groups:{...w.groups,[g]:w.groups[g].map((emp,i)=>i!==ei?emp:{...emp,shifts:emp.shifts.map((s,j)=>j!==si?s:{...s,...patch})})}}};});setMasterWeeks(next);};
   const appReqM=(wid,g,ei,si)=>{const s=masterWeeks.find(w=>w.id===wid)?.groups[g]?.[ei]?.shifts[si];updM(wid,g,ei,si,{reqSt:"APPROVED"});if(s?.reqId)setRequests(prev=>prev.map(r=>r.id===s.reqId?{...r,status:"APPROVED"}:r));};
   const denyReqM=(wid,g,ei,si)=>{const s=masterWeeks.find(w=>w.id===wid)?.groups[g]?.[ei]?.shifts[si];updM(wid,g,ei,si,{t:"",h:0,st:null,reqSt:"DENIED",reqId:null});if(s?.reqId)setRequests(prev=>prev.map(r=>r.id===s.reqId?{...r,status:"DENIED"}:r));};
-  const moveEmp=(wid,g,ei,dir)=>{const next=masterWeeks.map(w=>{if(w.id!==wid)return w;const arr=[...(w.groups[g]||[])];const ti=ei+dir;if(ti<0||ti>=arr.length)return w;[arr[ei],arr[ti]]=[arr[ti],arr[ei]];return{...w,groups:{...w.groups,[g]:arr}};});setMasterWeeks(next);saveToGas({masterWeeks:next});};
-  const renameEmp=(wid,g,ei,name)=>{const next=masterWeeks.map(w=>w.id!==wid?w:{...w,groups:{...w.groups,[g]:w.groups[g].map((e,i)=>i!==ei?e:{...e,name})}});setMasterWeeks(next);saveToGas({masterWeeks:next});};
+  const moveEmp=(wid,g,ei,dir)=>{const next=masterWeeks.map(w=>{if(w.id!==wid)return w;const arr=[...(w.groups[g]||[])];const ti=ei+dir;if(ti<0||ti>=arr.length)return w;[arr[ei],arr[ti]]=[arr[ti],arr[ei]];return{...w,groups:{...w.groups,[g]:arr}};});setMasterWeeks(next);};
+  const renameEmp=(wid,g,ei,name)=>{const next=masterWeeks.map(w=>w.id!==wid?w:{...w,groups:{...w.groups,[g]:w.groups[g].map((e,i)=>i!==ei?e:{...e,name})}});setMasterWeeks(next);};
 
   const confirmAddEmp=()=>{
     if(!newEmpName.trim()||!newEmpModal)return;
@@ -860,7 +859,6 @@ function MasterPage({masterWeeks,setMasterWeeks,liveWeeks,setLiveWeeks,masterArc
       return{...w,groups:{...w.groups,[grp]:[...(w.groups[grp]||[]),{id:uid(),name,shifts:w.dates.map((_,i)=>i===6?mkCl():mk(""))}]}};
     });
     setMasterWeeks(next);
-    saveToGas({masterWeeks:next});
     pushUndo&&pushUndo({type:"addEmp",name,grp,weekId});
     addAudit("Admin",`Added ${name} to ${grp} from week ${weekId}`);
     setNewEmpModal(null);setNewEmpName("");
@@ -877,7 +875,6 @@ function MasterPage({masterWeeks,setMasterWeeks,liveWeeks,setLiveWeeks,masterArc
       return{...w,groups:{...w.groups,[grp]:(w.groups[grp]||[]).filter(e=>e.name!==name)}};
     });
     setMasterWeeks(next);
-    saveToGas({masterWeeks:next});
     addAudit("Admin",`Deleted ${name} from ${grp} from week ${weekId} onward`);
     setDeleteConfirm(null);
   };
@@ -888,11 +885,10 @@ function MasterPage({masterWeeks,setMasterWeeks,liveWeeks,setLiveWeeks,masterArc
     const nextLive=wk?(liveWeeks.some(w=>w.id===wid)?liveWeeks.map(w=>w.id===wid?{...deepClone(wk),approved:true}:w):sortWeeks([...liveWeeks,{...deepClone(wk),approved:true}])):liveWeeks;
     setMasterWeeks(nextMaster);
     setLiveWeeks(nextLive);
-    saveToGas({masterWeeks:nextMaster,liveWeeks:nextLive});
     addAudit("Admin",`Published week ${wid}`);
   };
   const publishWeek=wid=>{const wk=masterWeeks.find(w=>w.id===wid);if(!wk)return;const flags=checkCoverage(wk);if(flags.length>0){setCoverageModal({weekId:wid,flags});return;}doPublish(wid);};
-  const unpublishWeek=wid=>{const nextMaster=masterWeeks.map(w=>w.id===wid?{...w,published:false}:w);const nextLive=liveWeeks.filter(w=>w.id!==wid);setMasterWeeks(nextMaster);setLiveWeeks(nextLive);saveToGas({masterWeeks:nextMaster,liveWeeks:nextLive});};
+  const unpublishWeek=wid=>{const nextMaster=masterWeeks.map(w=>w.id===wid?{...w,published:false}:w);const nextLive=liveWeeks.filter(w=>w.id!==wid);setMasterWeeks(nextMaster);setLiveWeeks(nextLive);};
   const archiveMasterWeek=wid=>{setMasterWeeks(prev=>{const w=prev.find(x=>x.id===wid);if(w)setMasterArchived(a=>{if(a.some(x=>x.id===wid))return a;return sortWeeks([...a,deepClone(w)]);});return prev.filter(x=>x.id!==wid);});};
   const restoreMasterArchived=wid=>{setMasterArchived(prev=>{const w=prev.find(x=>x.id===wid);if(w)setMasterWeeks(m=>{if(m.some(x=>x.id===wid))return m;return sortWeeks([...m,deepClone(w)]);});return prev.filter(x=>x.id!==wid);});};
   const pickerPos=rect=>{const ph=300;const y=(window.innerHeight-rect.bottom)>ph?rect.bottom+4:Math.max(60,rect.top-ph-4);return{x:Math.min(rect.left,window.innerWidth-258),y};};
@@ -1415,12 +1411,10 @@ function BackfillPage({liveWeeks,setLiveWeeks,liveArchived,setLiveArchived,maste
         return{...emp,shifts};
       });});return w;
     }));
-    let newLive=liveWeeks,newLiveArch=liveArchived,newMaster=masterWeeks,newMasterArch=masterArchived;
-    applyToPool(liveWeeks,v=>{newLive=v;setLiveWeeks(v);});
-    applyToPool(liveArchived,v=>{newLiveArch=v;setLiveArchived(v);});
-    applyToPool(masterWeeks,v=>{newMaster=v;setMasterWeeks(v);});
-    applyToPool(masterArchived,v=>{newMasterArch=v;setMasterArchived(v);});
-    saveToGas({liveWeeks:newLive,liveArchived:newLiveArch,masterWeeks:newMaster,masterArchived:newMasterArch});
+    applyToPool(liveWeeks,setLiveWeeks);
+    applyToPool(liveArchived,setLiveArchived);
+    applyToPool(masterWeeks,setMasterWeeks);
+    applyToPool(masterArchived,setMasterArchived);
     setCommitted(true);setMsg(`✓ Applied ${entries.length} backfill entries.`);
   };
 
