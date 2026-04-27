@@ -190,19 +190,9 @@ function checkCoverage(week){
 }
 
 /* ══ INITIAL DATA ═══════════════════════════════════════════════════ */
-const IW=[
-  {id:"w1",label:"Apr 20–26",dates:["20-Apr","21-Apr","22-Apr","23-Apr","24-Apr","25-Apr","26-Apr"],approved:true,groups:{
-    Tech:[{id:"t1",name:"Sally",shifts:[mk("12-7"),mk("12-7"),mk("7:30-2:30"),mk("7:30-2:30"),mk("12-7"),mk("","OFF"),mkCl()]},{id:"t2",name:"Kira",shifts:[mk("8-4"),mk("8-4"),mk("8-4"),mk("2-8"),mk("2-8"),mk("","OFF"),mkCl()]},{id:"t3",name:"Tanya",shifts:[mk("","VAC"),mk("2-8"),mk("12-8"),mk("8-4"),mk("","OFF"),mk("8:30-4:30"),mkCl()]},{id:"t4",name:"Katy",shifts:[mk("7:30-2:30"),mk("7:30-2:30"),mk("12-8"),mk("12-7"),mk("7:30-2:30"),mk("","VAC"),mkCl()]},{id:"t5",name:"Danielle",shifts:[mk("12-7"),mk("8-2"),mk("","VAC"),mk("8-2"),mk("8-2"),mk("","OFF"),mkCl()]}],
-    VA:[{id:"v1",name:"Catherine",shifts:[mk("8-4"),mk("8-4"),mk("7:30-2:30"),mk("7:30-2:30"),mk("2-8"),mk("","OFF"),mkCl()]},{id:"v2",name:"Felicity",shifts:[mk("8-4"),mk("2-8"),mk("12-7"),mk("","OFF"),mk("8-4"),mk("8:30-4:30"),mkCl()]},{id:"v3",name:"Greta",shifts:[mk("7:30-2:30"),mk("12-8"),mk("2-8"),mk("12-8"),mk("7:30-2:30"),mk("","OFF"),mkCl()]},{id:"v4",name:"Belle",shifts:[mk("12-8"),mk("7:30-2:30"),mk("8-4"),mk("12-8"),mk("","OFF"),mk("8:30-4:30"),mkCl()]}],
-    CCR:[{id:"c1",name:"Kath",shifts:[mk("8-4"),mk("7:30-2:30"),mk("12-8"),mk("8-4"),mk("7:30-2:30"),mk("","OFF"),mkCl()]},{id:"c2",name:"Hanna",shifts:[mk("7:30-2:30"),mk("8-4"),mk("2-8"),mk("12-8"),mk("8-4"),mk("","OFF"),mkCl()]},{id:"c3",name:"Ernie",shifts:[mk("12-8"),mk("2-8"),mk("8-4"),mk("7:30-2:30"),mk("2-8"),mk("","OFF"),mkCl()]},{id:"c4",name:"Jess",shifts:[mk("2-8"),mk("12-8"),mk("7:30-2:30"),mk("","OFF"),mk("","VAC"),mk("8:30-4:30"),mkCl()]},{id:"c5",name:"Estel",shifts:[mk(""),mk(""),mk(""),mk(""),mk("12-8"),mk("","OFF"),mkCl()]}]
-  }},
-  {id:"w2",label:"Apr 27 – May 3",dates:["27-Apr","28-Apr","29-Apr","30-Apr","1-May","2-May","3-May"],approved:true,groups:{
-    Tech:[{id:"tb1",name:"Sally",shifts:[mk("12-7"),mk("","VAC"),mk("7:30-2:30"),mk("","VAC"),mk("12-8"),mk("","OFF"),mkCl()]},{id:"tb2",name:"Kira",shifts:[mk("2-8"),mk("12-7"),mk("8-4"),mk("7:30-2:30"),mk("8-4"),mk("","OFF"),mkCl()]},{id:"tb3",name:"Tanya",shifts:[mk("7:30-2:30"),mk("8-4"),mk("2-8"),mk("12-7"),mk("7:30-2:30"),mk("","OFF"),mkCl()]},{id:"tb4",name:"Katy",shifts:[mk("8-4"),mk("7:30-2:30"),mk("12-7"),mk("2-8"),mk("","OFF"),mk("8:30-4:30"),mkCl()]},{id:"tb5",name:"Danielle",shifts:[mk("8-2"),mk("2-8"),mk("","OFF"),mk("8-2"),mk("1-7"),mk("","OFF"),mkCl()]}],
-    VA:[{id:"vb1",name:"Catherine",shifts:[mk("2-8"),mk("1-7"),mk("8-4"),mk("","OFF"),mk("8-4"),mk("8:30-4:30"),mkCl()]},{id:"vb2",name:"Felicity",shifts:[mk("8-4"),mk("2-8"),mk("12-7"),mk("7:30-2:30"),mk("7:30-2:30"),mk("","OFF"),mkCl()]},{id:"vb3",name:"Greta",shifts:[mk("8-4"),mk("7:30-2:30"),mk("7:30-2:30"),mk("12-8"),mk("2-8"),mk("","VAC"),mkCl()]},{id:"vb4",name:"Belle",shifts:[mk("7:30-2:30"),mk("8-4"),mk("2-8"),mk("12-8"),mk("12-8"),mk("","OFF"),mkCl()]}],
-    CCR:[{id:"cb1",name:"Kath",shifts:[mk("8-4"),mk("7:30-2:30"),mk("12-8"),mk("","OFF"),mk("2-8"),mk("8:30-4:30"),mkCl()]},{id:"cb2",name:"Hanna",shifts:[mk("2-8"),mk("12-8"),mk("7:30-2:30"),mk("12-8"),mk("8-4"),mk("","OFF"),mkCl()]},{id:"cb3",name:"Ernie",shifts:[mk("12-8"),mk("2-8"),mk("8-4"),mk("7:30-2:30"),mk("7:30-2:30"),mk("","OFF"),mkCl()]},{id:"cb4",name:"Jess",shifts:[mk("7:30-2:30"),mk("8-4"),mk("2-8"),mk("8-4"),mk("12-8"),mk("","OFF"),mkCl()]},{id:"cb5",name:"Estel",shifts:[mk(""),mk(""),mk(""),mk(""),mk(""),mk("8:30-4:30"),mkCl()]}]
-  }},
-];
-const initStaff=()=>{const s=new Map();IW.forEach(w=>GROUPS.forEach(g=>(w.groups[g]||[]).forEach(e=>{if(!s.has(e.name))s.set(e.name,{name:e.name,group:g,pin:""});})));return[...s.values()];};
+// No hardcoded data — all data loads from Google Sheet
+const IW=[];
+const initStaff=()=>[];
 
 /* ══ PIN PAD ════════════════════════════════════════════════════════ */
 function PinPad({validPins,onMatch,onCancel,title,subtitle,dark=false}){
@@ -892,12 +882,16 @@ function MasterPage({masterWeeks,setMasterWeeks,liveWeeks,setLiveWeeks,masterArc
   };
 
   const doPublish=wid=>{
-    setMasterWeeks(prev=>prev.map(w=>w.id===wid?{...w,published:true}:w));
-    setLiveWeeks(prev=>{const wk=masterWeeks.find(w=>w.id===wid);if(!wk)return prev;if(prev.some(w=>w.id===wid))return prev.map(w=>w.id===wid?{...deepClone(wk),approved:true}:w);return sortWeeks([...prev,{...deepClone(wk),approved:true}]);});
+    const nextMaster=masterWeeks.map(w=>w.id===wid?{...w,published:true}:w);
+    const wk=nextMaster.find(w=>w.id===wid);
+    const nextLive=wk?(liveWeeks.some(w=>w.id===wid)?liveWeeks.map(w=>w.id===wid?{...deepClone(wk),approved:true}:w):sortWeeks([...liveWeeks,{...deepClone(wk),approved:true}])):liveWeeks;
+    setMasterWeeks(nextMaster);
+    setLiveWeeks(nextLive);
+    saveToGas({masterWeeks:nextMaster,liveWeeks:nextLive});
     addAudit("Admin",`Published week ${wid}`);
   };
   const publishWeek=wid=>{const wk=masterWeeks.find(w=>w.id===wid);if(!wk)return;const flags=checkCoverage(wk);if(flags.length>0){setCoverageModal({weekId:wid,flags});return;}doPublish(wid);};
-  const unpublishWeek=wid=>{setMasterWeeks(prev=>prev.map(w=>w.id===wid?{...w,published:false}:w));setLiveWeeks(prev=>prev.filter(w=>w.id!==wid));};
+  const unpublishWeek=wid=>{const nextMaster=masterWeeks.map(w=>w.id===wid?{...w,published:false}:w);const nextLive=liveWeeks.filter(w=>w.id!==wid);setMasterWeeks(nextMaster);setLiveWeeks(nextLive);saveToGas({masterWeeks:nextMaster,liveWeeks:nextLive});};
   const archiveMasterWeek=wid=>{setMasterWeeks(prev=>{const w=prev.find(x=>x.id===wid);if(w)setMasterArchived(a=>{if(a.some(x=>x.id===wid))return a;return sortWeeks([...a,deepClone(w)]);});return prev.filter(x=>x.id!==wid);});};
   const restoreMasterArchived=wid=>{setMasterArchived(prev=>{const w=prev.find(x=>x.id===wid);if(w)setMasterWeeks(m=>{if(m.some(x=>x.id===wid))return m;return sortWeeks([...m,deepClone(w)]);});return prev.filter(x=>x.id!==wid);});};
   const pickerPos=rect=>{const ph=300;const y=(window.innerHeight-rect.bottom)>ph?rect.bottom+4:Math.max(60,rect.top-ph-4);return{x:Math.min(rect.left,window.innerWidth-258),y};};
@@ -1420,8 +1414,12 @@ function BackfillPage({liveWeeks,setLiveWeeks,liveArchived,setLiveArchived,maste
         return{...emp,shifts};
       });});return w;
     }));
-    applyToPool(liveWeeks,setLiveWeeks);applyToPool(liveArchived,setLiveArchived);
-    applyToPool(masterWeeks,setMasterWeeks);applyToPool(masterArchived,setMasterArchived);
+    let newLive=liveWeeks,newLiveArch=liveArchived,newMaster=masterWeeks,newMasterArch=masterArchived;
+    applyToPool(liveWeeks,v=>{newLive=v;setLiveWeeks(v);});
+    applyToPool(liveArchived,v=>{newLiveArch=v;setLiveArchived(v);});
+    applyToPool(masterWeeks,v=>{newMaster=v;setMasterWeeks(v);});
+    applyToPool(masterArchived,v=>{newMasterArch=v;setMasterArchived(v);});
+    saveToGas({liveWeeks:newLive,liveArchived:newLiveArch,masterWeeks:newMaster,masterArchived:newMasterArch});
     setCommitted(true);setMsg(`✓ Applied ${entries.length} backfill entries.`);
   };
 
@@ -1923,7 +1921,7 @@ function App(){
   const pushUndo=useCallback(action=>setUndoStack(action),[]);
   const doUndo=()=>{
     if(!undoStack)return;
-    if(undoStack.type==="delEmp"&&undoStack.snapshot){setMasterWeeks(undoStack.snapshot);addAudit("Admin","Undo: restored deleted employee");}
+    if(undoStack.type==="delEmp"&&undoStack.snapshot){setMasterWeeks(undoStack.snapshot);saveToGas({masterWeeks:undoStack.snapshot});addAudit("Admin","Undo: restored deleted employee");}
     setUndoStack(null);
   };
 
