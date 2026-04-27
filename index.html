@@ -1877,11 +1877,11 @@ function App(){
     setSyncing(true);
     try {
       const res = await gasSaveSchedule(gasToken, changes);
-      // Apply the server-confirmed state so local UI matches Sheet truth,
-      // and advance lastModTs so the next poll sees no delta and skips fetch.
-      if (res?.ok && res?.data) {
-        applySchedData(res.data);
-        if (res.data.lastModified) setLastModTs(res.data.lastModified);
+      // Only advance the timestamp — do NOT apply data back.
+      // The Sheet write may not have flushed yet so reading back
+      // risks returning stale/empty arrays that wipe local state.
+      if (res?.ok && res?.data?.lastModified) {
+        setLastModTs(res.data.lastModified);
       }
     } catch(err) {
       console.warn("GAS save failed:", err.message);
