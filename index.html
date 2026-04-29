@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes" />
   <title>HPVH Schedule</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
@@ -60,15 +60,15 @@ async function sbSaveAll(data) {
 }
 
 /* ── CONSTANTS ──────────────────────────────────────────────────── */
-const APP_VERSION = "v4.0-supabase";
+const APP_VERSION = "v5.0";
 const DAYS = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
 const GROUPS = ["Tech","VA","CCR"];
 const MON = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 const DEFAULT_LOCK_MS = 5 * 60 * 1000;
 
-// v2: cell sizing — fixed cell height so cells never grow with tags/markers
-const CELL_HEIGHT = 64;
-const CELL_PADDING = "5px 7px";
+// Cell sizing — matches master schedule look
+const CELL_HEIGHT = 76;
+const CELL_PADDING = "6px 8px";
 
 // v2: backfill date range
 const BACKFILL_START = "1-Jan";
@@ -99,8 +99,16 @@ const TAG_CFG = {
   ADMIN:    {l:"🎯 Admin",    c:"#4f46e5", bg:"#ede9fe", lbl:"ADM"},
   INVENTORY:{l:"📦 Inventory",c:"#15803d", bg:"#dcfce7", lbl:"INV"},
   COVER:    {l:"🔄 Cover",    c:"#0369a1", bg:"#e0f2fe", lbl:"CVR"},
+  LATE:     {l:"🕐 Late",     c:"#b45309", bg:"#fef3c7", lbl:"LTE"},
   REQ:      {l:"📝 Req",      c:"#dc2626", bg:"#fee2e2", lbl:"REQ", adminOnly:true},
 };
+
+// Merge built-in tags with any custom tags added by admin
+function getTagCfg(customTags=[]) {
+  const out = {...TAG_CFG};
+  (customTags||[]).forEach(t=>{ out[t.id]={l:t.label,c:t.color||"#475569",bg:t.bg||"#f1f5f9",lbl:t.lbl}; });
+  return out;
+}
 
 const REQ_TYPES = {
   VAC:    {l:"Vacation",            s:"VAC",    color:"#f59e0b"},
@@ -231,8 +239,11 @@ function checkCoverage(week) {
     if(!t) return [99, 0];
     const [a, b] = t.split("-");
     let st = parseHr(a), en = parseHr(b);
-    // If end time appears to be PM (smaller than start, and start is morning/midday) — roll forward 12h
-    if (en < st) en += 12;
+    // PM rollover: if end <= start it must be PM — add 12
+    // Also handle explicit small end times: 2 means 14:00, 8 means 20:00
+    // Rule: end times ≤ 9 are always PM (afternoon/evening)
+    if (en <= 9) en += 12;
+    else if (en < st) en += 12;
     return [st, en];
   };
   // Approx float compare (avoid 7.499999 vs 7.5 misses)
@@ -416,19 +427,39 @@ function GasPinPad({onEntry,err,checking,dark=false}){
   const bg=dark?"#1e293b":"#fff";
   const bd=dark?"#334155":"#e2e8f0";
   const tx=dark?"#f8fafc":"#1e293b";
+  const btnBg=dark?"#0f172a":"#f8fafc";
+  const btnHov=dark?"#1e3a8a":"#eff6ff";
   const dots=Array(4).fill(0).map((_,i)=>(
     <div key={i} style={{width:12,height:12,borderRadius:"50%",background:err?"#ef4444":input.length>i?(dark?"#f8fafc":"#1e293b"):"transparent",border:`2px solid ${err?"#ef4444":bd}`,transition:"background 0.1s"}}/>
   ));
-  const press=d=>{
-    if(checking||input.length>=4)return;
-    const nv=input+d;
-    setInput(nv);
-    if(nv.length===4){
-      onEntry(nv);
-      setTimeout(()=>setInput(""),800);
-    }
-  };
+  const trySubmit = useCallback((val) => {
+    if(val.length>=3){ onEntry(val); setTimeout(()=>setInput(""),800); }
+  },[onEntry]);
+  const press=useCallback(d=>{
+    if(checking)return;
+    setInput(prev=>{
+      if(prev.length>=4)return prev;
+      const nv=prev+d;
+      // Auto-submit at 4 digits
+      if(nv.length===4){ setTimeout(()=>trySubmit(nv),0); }
+      return nv;
+    });
+  },[checking,trySubmit]);
   const del=()=>{if(!checking)setInput(p=>p.slice(0,-1));};
+  const confirm=useCallback(()=>{ setInput(p=>{ if(p.length>=3)setTimeout(()=>trySubmit(p),0); return p; }); },[trySubmit]);
+
+  // Keyboard support
+  useEffect(()=>{
+    const h=e=>{
+      const numByCode=e.code?.startsWith("Numpad")&&"0123456789".includes(e.code.slice(6))?e.code.slice(6):null;
+      const digit="0123456789".includes(e.key)?e.key:numByCode;
+      if(digit)press(digit);
+      else if(e.key==="Backspace")del();
+      else if(e.key==="Enter")confirm();
+    };
+    window.addEventListener("keydown",h); return()=>window.removeEventListener("keydown",h);
+  },[press,confirm]);
+
   return(
     <div style={{background:bg,borderRadius:16,padding:24,width:260,boxShadow:dark?"0 24px 64px rgba(0,0,0,0.4)":"0 4px 20px rgba(0,0,0,0.1)"}}>
       <div style={{textAlign:"center",marginBottom:20,fontSize:11,color:dark?"#94a3b8":"#64748b",fontWeight:600}}>
@@ -437,11 +468,11 @@ function GasPinPad({onEntry,err,checking,dark=false}){
       <div style={{display:"flex",justifyContent:"center",gap:12,marginBottom:24}}>{dots}</div>
       <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8}}>
         {[1,2,3,4,5,6,7,8,9].map(n=>(
-          <button key={n} onClick={()=>press(String(n))} disabled={checking} style={{padding:"14px",borderRadius:10,border:`1px solid ${bd}`,background:bg,color:tx,fontSize:18,fontWeight:600,cursor:checking?"not-allowed":"pointer",opacity:checking?0.5:1}}>{n}</button>
+          <button key={n} onClick={()=>press(String(n))} disabled={checking} style={{padding:"14px",borderRadius:10,border:`1px solid ${bd}`,background:btnBg,color:tx,fontSize:18,fontWeight:600,cursor:checking?"not-allowed":"pointer",opacity:checking?0.5:1}} onMouseEnter={e=>e.currentTarget.style.background=btnHov} onMouseLeave={e=>e.currentTarget.style.background=btnBg}>{n}</button>
         ))}
-        <div/>
-        <button onClick={()=>press("0")} disabled={checking} style={{padding:"14px",borderRadius:10,border:`1px solid ${bd}`,background:bg,color:tx,fontSize:18,fontWeight:600,cursor:checking?"not-allowed":"pointer",opacity:checking?0.5:1}}>0</button>
-        <button onClick={del} disabled={checking} style={{padding:"14px",borderRadius:10,border:`1px solid ${bd}`,background:bg,color:tx,fontSize:14,cursor:checking?"not-allowed":"pointer",opacity:checking?0.5:1}}>⌫</button>
+        <button onClick={del} disabled={checking} style={{padding:"14px",borderRadius:10,border:`1px solid ${bd}`,background:"#7f1d1d",color:"#fca5a5",fontSize:14,cursor:checking?"not-allowed":"pointer",opacity:checking?0.5:1}}>⌫</button>
+        <button onClick={()=>press("0")} disabled={checking} style={{padding:"14px",borderRadius:10,border:`1px solid ${bd}`,background:btnBg,color:tx,fontSize:18,fontWeight:600,cursor:checking?"not-allowed":"pointer",opacity:checking?0.5:1}} onMouseEnter={e=>e.currentTarget.style.background=btnHov} onMouseLeave={e=>e.currentTarget.style.background=btnBg}>0</button>
+        <button onClick={confirm} disabled={checking} style={{padding:"14px",borderRadius:10,border:"none",background:"#1d4ed8",color:"#fff",fontSize:16,cursor:checking?"not-allowed":"pointer",fontWeight:700,opacity:checking?0.5:1}} onMouseEnter={e=>e.currentTarget.style.background="#2563eb"} onMouseLeave={e=>e.currentTarget.style.background="#1d4ed8"}>✓</button>
       </div>
     </div>
   );
@@ -473,14 +504,19 @@ function LandingLock({adminName1,adminName2,onAccess,gasVerifyAdmin,gasVerifyAny
   const [pinErr,setPinErr]=useState(false);
   const [checking,setChecking]=useState(false);
 
-  // GAS-backed PIN check: ask the server, never validate client-side
+  // PIN check — local against loaded data
   const handlePinEntry = async (pin) => {
     if(checking) return;
     setChecking(true);
     try {
       const res = await gasVerifyAnyPin(pin);
       if(res.match){
-        onAccess({type:"staff", name:res.name, group:res.group});
+        // Admin PIN enters as admin type
+        if(res.group==="admin"){
+          onAccess({type:"admin", name:res.name, profileIdx:1});
+        } else {
+          onAccess({type:"staff", name:res.name, group:res.group});
+        }
       } else {
         setPinErr(true);
         setTimeout(()=>setPinErr(false), 1200);
@@ -526,7 +562,6 @@ function LandingLock({adminName1,adminName2,onAccess,gasVerifyAdmin,gasVerifyAny
 
       {!showAdmin ? (
         <div>
-          {/* GAS-backed PinPad: each digit fires server check on 4 digits */}
           <GasPinPad onEntry={handlePinEntry} err={pinErr} checking={checking} dark/>
           <button onClick={()=>setShowAdmin(true)} style={{marginTop:16,width:"100%",padding:"8px",borderRadius:8,border:"1px solid #334155",background:"none",color:"#475569",fontSize:9,cursor:"pointer"}}>Admin / Password login</button>
         </div>
@@ -575,9 +610,10 @@ function StaffPinModal({name,group,C,onUnlock,onClose,gasVerifyPin}){
 }
 
 /* ── SHIFT CELL ─────────────────────────────────────────────────── */
-function ShiftCell({s,group,isAdmin,canSwap,isToday,C,customDayLabels,
+function ShiftCell({s,group,isAdmin,canSwap,isToday,C,customDayLabels,customTags,
   onTap,onLong,onCtxMenu,onHrsChange,onSickHrsChange,
   onApprove,onDeny,onApproveSwap,onDenySwap,onSwapRequest}){
+  const TC = getTagCfg(customTags);
   const sc = getShiftColor(s,group,C);
   const isPending = s?.reqSt==="PENDING";
   const customLabel = s?.customLabel||(customDayLabels?.[0]||"Custom");
@@ -593,79 +629,76 @@ function ShiftCell({s,group,isAdmin,canSwap,isToday,C,customDayLabels,
     if(isAdmin&&onCtxMenu){ if(lp._markCtx)lp._markCtx(); onCtxMenu(e.clientX,e.clientY); }
   },[isAdmin,onCtxMenu,lp]);
 
-  // v3: today highlight uses inset box-shadow so it doesn't change cell visual size
   const todayRing = isToday ? {boxShadow:"inset 0 0 0 2px #3b82f6"} : {};
-
-  // v2: filter REQ tag for non-admin viewers
-  const visibleTags = (s?.tg||[]).filter(t => !TAG_CFG[t]?.adminOnly || isAdmin);
+  const visibleTags = (s?.tg||[]).filter(t => !TC[t]?.adminOnly || isAdmin);
+  const hasTags = visibleTags.length > 0;
 
   return (
     <td style={{padding:0,height:CELL_HEIGHT,maxHeight:CELL_HEIGHT,minWidth:88,maxWidth:88,verticalAlign:"top",overflow:"hidden"}}>
       <div {...lp} onContextMenu={handleCtx}
-        style={{background:sc.bg,border:`${isPending?"2px dashed":"1px solid"} ${sc.bo}`,borderRadius:6,margin:"3px 2px",padding:CELL_PADDING,height:`calc(${CELL_HEIGHT}px - 6px)`,boxSizing:"border-box",cursor:(isAdmin||canSwap)?"pointer":"default",display:"flex",flexDirection:"column",justifyContent:"center",userSelect:"none",WebkitUserSelect:"none",position:"relative",overflow:"hidden",...todayRing}}
+        style={{background:sc.bg,border:`${isPending?"2px dashed":"1px solid"} ${sc.bo}`,borderRadius:6,margin:"3px 2px",padding:CELL_PADDING,height:`calc(${CELL_HEIGHT}px - 6px)`,boxSizing:"border-box",cursor:(isAdmin||canSwap)?"pointer":"default",display:"flex",flexDirection:"column",justifyContent:"flex-start",userSelect:"none",WebkitUserSelect:"none",position:"relative",overflow:"hidden",...todayRing}}
         onMouseEnter={e=>{if(isAdmin||canSwap)e.currentTarget.style.borderColor="#3b82f6";}}
         onMouseLeave={e=>{e.currentTarget.style.borderColor=sc.bo;}}>
 
-        {/* Tags overlay - absolute top so they don't push content */}
-        {visibleTags.length>0&&(
-          <div style={{position:"absolute",top:2,left:3,right:3,display:"flex",gap:2,flexWrap:"wrap",zIndex:2,pointerEvents:"none"}}>
-            {visibleTags.map(t=>{const tc=TAG_CFG[t]||{}; return <span key={t} style={{fontSize:7,padding:"1px 4px",borderRadius:3,fontWeight:700,background:tc.bg||"#f1f5f9",color:tc.c||"#475569"}}>{tc.lbl||t}</span>;})}
+        {/* Tags row — in flow at top, shift content below */}
+        {hasTags&&(
+          <div style={{display:"flex",gap:2,flexWrap:"wrap",marginBottom:3}}>
+            {visibleTags.map(t=>{const tc=TC[t]||{}; return <span key={t} style={{fontSize:7,padding:"1px 4px",borderRadius:3,fontWeight:700,background:tc.bg||"#f1f5f9",color:tc.c||"#475569",whiteSpace:"nowrap"}}>{tc.lbl||t}</span>;})}
           </div>
         )}
 
-        {/* Status badges - absolute top-left when not tagged */}
-        {s?.swapPending&&!s?.swapped&&<div style={{position:"absolute",top:visibleTags.length?12:2,left:4,fontSize:7,color:"#7c3aed",fontWeight:700,zIndex:2}}>🔄 SWAP</div>}
-        {isPending&&<div style={{position:"absolute",top:visibleTags.length?12:2,left:4,fontSize:7,color:"#92400e",fontWeight:700,zIndex:2}}>⏳ PENDING</div>}
+        {/* Swap / pending badges */}
+        {s?.swapPending&&!s?.swapped&&<div style={{fontSize:9,color:"#7c3aed",fontWeight:700,marginBottom:1}}>🔄 SWAP</div>}
+        {isPending&&<div style={{fontSize:7,color:"#92400e",fontWeight:700,marginBottom:1}}>⏳ PENDING</div>}
 
-        {/* Center content */}
-        {s?.st==="VAC"&&<div style={{fontSize:12,fontWeight:700,color:sc.tx,textAlign:"center"}}>🌴 VAC</div>}
-        {s?.st==="OFF"&&<div style={{fontSize:11,color:sc.tx,textAlign:"center"}}>OFF</div>}
-        {s?.st==="CLOSED"&&<div style={{fontSize:10,color:sc.tx,fontWeight:600,textAlign:"center"}}>CLOSED</div>}
-        {s?.st==="CUSTOM"&&<div style={{fontSize:10,fontWeight:700,color:sc.tx,textAlign:"center"}}>⭐ {customLabel}</div>}
-        {s?.st==="SICK"&&(
-          <div style={{textAlign:"center"}}>
-            <div style={{fontSize:9,color:"#94a3b8",textDecoration:"line-through"}}>{s.t||"—"}</div>
-            <div style={{fontSize:9,color:sc.tx,fontWeight:700}}>🤒 SICK</div>
-            <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:3,marginTop:1}}
-                 onClick={e=>e.stopPropagation()}
-                 onMouseDown={e=>e.stopPropagation()}
-                 onMouseUp={e=>e.stopPropagation()}
-                 onTouchStart={e=>e.stopPropagation()}
-                 onTouchEnd={e=>e.stopPropagation()}>
+        {/* Main cell content — vertically centred in remaining space */}
+        <div style={{flex:1,display:"flex",flexDirection:"column",justifyContent:"center"}}>
+          {s?.st==="VAC"&&<div style={{fontSize:12,fontWeight:700,color:sc.tx,textAlign:"center"}}>🌴 VAC</div>}
+          {s?.st==="OFF"&&<div style={{fontSize:11,color:sc.tx,textAlign:"center"}}>OFF</div>}
+          {s?.st==="CLOSED"&&<div style={{fontSize:10,color:sc.tx,fontWeight:600,textAlign:"center"}}>CLOSED</div>}
+          {s?.st==="CUSTOM"&&<div style={{fontSize:10,fontWeight:700,color:sc.tx,textAlign:"center"}}>⭐ {customLabel}</div>}
+          {s?.st==="SICK"&&(
+            <div style={{textAlign:"center"}}>
+              {/* Show original scheduled shift + role */}
+              {s.t&&<div style={{fontSize:9,color:"#94a3b8",textDecoration:"line-through",marginBottom:1}}>{s.t} · {group}</div>}
+              <div style={{fontSize:9,color:sc.tx,fontWeight:700}}>🤒 SICK</div>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:3,marginTop:2}}
+                   onClick={e=>e.stopPropagation()} onMouseDown={e=>e.stopPropagation()}
+                   onMouseUp={e=>e.stopPropagation()} onTouchStart={e=>e.stopPropagation()}
+                   onTouchEnd={e=>e.stopPropagation()}>
+                {isAdmin
+                  ? <input type="number" min="0" max="12" step="0.5" value={s.sh!==null?s.sh:""} onChange={e=>onSickHrsChange&&onSickHrsChange(e.target.value===""?null:+e.target.value)} placeholder="0" style={{width:28,background:"#fff",border:"1px solid #f87171",borderRadius:3,color:"#991b1b",fontSize:9,padding:"0 3px",outline:"none",textAlign:"center"}}/>
+                  : <span style={{fontSize:9,color:"#991b1b"}}>{s.sh!==null?`${s.sh}h`:"0h"}</span>
+                }
+                <span style={{fontSize:8,color:"#94a3b8"}}>h</span>
+              </div>
+            </div>
+          )}
+          {!s?.st&&s?.t&&(
+            <div style={{textAlign:"left"}}>
+              <div style={{fontSize:12,fontWeight:700,color:sc.tx,lineHeight:1.1}}>{s.t}</div>
               {isAdmin
-                ? <input type="number" min="0" max="12" step="0.5" value={s.sh!==null?s.sh:""} onChange={e=>onSickHrsChange&&onSickHrsChange(e.target.value===""?null:+e.target.value)} placeholder="0" style={{width:28,background:"#fff",border:"1px solid #f87171",borderRadius:3,color:"#991b1b",fontSize:9,padding:"0 3px",outline:"none",textAlign:"center"}}/>
-                : <span style={{fontSize:9,color:"#991b1b"}}>{s.sh!==null?`${s.sh}h`:"0h"}</span>
+                ? <input type="number" min="0" max="24" step="0.5" value={s.h||""} onChange={e=>onHrsChange&&onHrsChange(+e.target.value||0)} style={{width:24,background:"none",border:"none",color:"#94a3b8",fontSize:9,padding:"0",outline:"none",marginTop:2,textAlign:"left"}} onClick={e=>e.stopPropagation()} onMouseDown={e=>e.stopPropagation()} onMouseUp={e=>e.stopPropagation()}/>
+                : <div style={{fontSize:9,color:"#94a3b8",marginTop:2}}>{s.h?`${s.h}h`:""}</div>
               }
             </div>
-          </div>
-        )}
-        {!s?.st&&s?.t&&(
-          <div style={{textAlign:"left"}}>
-            <div style={{fontSize:12,fontWeight:700,color:sc.tx,lineHeight:1.1}}>{s.t}</div>
-            {/* v2: removed dotted underline beneath hours */}
-            {isAdmin
-              ? <input type="number" min="0" max="24" step="0.5" value={s.h||""} onChange={e=>onHrsChange&&onHrsChange(+e.target.value||0)} style={{width:24,background:"none",border:"none",color:"#94a3b8",fontSize:9,padding:"0",outline:"none",marginTop:1,textAlign:"left"}} onClick={e=>e.stopPropagation()} onMouseDown={e=>e.stopPropagation()} onMouseUp={e=>e.stopPropagation()}/>
-              : <div style={{fontSize:9,color:"#94a3b8",marginTop:1}}>{s.h?`${s.h}h`:""}</div>
-            }
-          </div>
-        )}
-        {!s?.st&&!s?.t&&isAdmin&&<div style={{fontSize:9,color:"#cbd5e1",textAlign:"center"}}>+ add</div>}
-        {!isAdmin&&canSwap&&s?.t&&!s?.st&&<div style={{position:"absolute",bottom:3,left:0,right:0,fontSize:7,color:"#7c3aed",fontWeight:700,textAlign:"center",zIndex:2}}>tap to swap</div>}
+          )}
+          {!s?.st&&!s?.t&&isAdmin&&<div style={{fontSize:9,color:"#cbd5e1",textAlign:"center"}}>+ add</div>}
+          {!isAdmin&&canSwap&&s?.t&&!s?.st&&<div style={{fontSize:7,color:"#7c3aed",fontWeight:700,textAlign:"center",marginTop:2}}>tap to swap</div>}
+        </div>
 
-        {/* Admin approve/deny absolute bottom - doesn't grow cell */}
+        {/* Approve/deny buttons pinned to bottom */}
         {(isPending||(s?.swapPending&&!s?.swapped))&&isAdmin&&(
-          <div style={{position:"absolute",bottom:2,left:3,right:3,display:"flex",gap:3,zIndex:3}}
-               onClick={e=>e.stopPropagation()}
-               onMouseDown={e=>e.stopPropagation()}
-               onMouseUp={e=>e.stopPropagation()}
-               onTouchStart={e=>e.stopPropagation()}
+          <div style={{display:"flex",gap:3,marginTop:3}}
+               onClick={e=>e.stopPropagation()} onMouseDown={e=>e.stopPropagation()}
+               onMouseUp={e=>e.stopPropagation()} onTouchStart={e=>e.stopPropagation()}
                onTouchEnd={e=>e.stopPropagation()}>
             <Btn onClick={isPending?onApprove:onApproveSwap} variant="success" style={{flex:1,padding:"1px",fontSize:7,minWidth:0}}>✓</Btn>
             <Btn onClick={isPending?onDeny:onDenySwap} variant="danger" style={{flex:1,padding:"1px",fontSize:7,minWidth:0}}>✕</Btn>
           </div>
         )}
 
-        {s?.swapped&&<div style={{position:"absolute",bottom:2,right:4,fontSize:7,color:sc.tx,fontWeight:700,opacity:0.8,zIndex:2}}>↔</div>}
+        {s?.swapped&&<div style={{position:"absolute",bottom:3,right:4,fontSize:10,color:sc.tx,fontWeight:700,opacity:0.8}}>⇄</div>}
       </div>
     </td>
   );
@@ -675,18 +708,38 @@ function ShiftCell({s,group,isAdmin,canSwap,isToday,C,customDayLabels,
 function ShiftPicker({pos,currentShift,shiftIdx,onSelect,onClose}){
   const [customTime,setCustomTime]=useState("");
   const [showCustom,setShowCustom]=useState(false);
-  const style={position:"fixed",top:pos.y,left:pos.x,zIndex:8000,background:"#fff",borderRadius:10,boxShadow:"0 8px 32px rgba(0,0,0,0.18)",padding:10,width:230,border:"1px solid #e2e8f0"};
-  // v3: Saturday (index 5) shows only 8:30-4:30 preset; weekdays show full preset list
+  const style={position:"fixed",top:pos.y,left:pos.x,zIndex:8000,background:"#fff",borderRadius:10,boxShadow:"0 8px 32px rgba(0,0,0,0.18)",padding:10,width:240,border:"1px solid #e2e8f0"};
   const isSat = shiftIdx===5;
-  const presets = isSat ? SA_PRESETS.flat() : WD_PRESETS.flat();
+  // Day shifts (left col), Evening shifts (right col) — in requested order
+  const DAY_SHIFTS   = ["7:30-2:30","7:30-3:30","8-2","8-4"];
+  const EVE_SHIFTS   = ["12-8","2-8","12-7","1-7"];
+  const SAT_SHIFTS   = ["8:30-4:30"];
+  const btn = t => (
+    <button key={t} onClick={()=>onSelect(t)}
+      style={{padding:"9px 4px",borderRadius:7,border:`1px solid ${currentShift?.t===t?"#3b82f6":"#e2e8f0"}`,
+        background:currentShift?.t===t?"#eff6ff":"#f8fafc",
+        color:currentShift?.t===t?"#1d4ed8":"#374151",
+        fontSize:11,fontWeight:currentShift?.t===t?700:500,cursor:"pointer",textAlign:"center",width:"100%"}}>
+      {t}
+    </button>
+  );
   return (
     <div data-ov style={style}>
       <div style={{fontSize:9,fontWeight:700,color:"#94a3b8",marginBottom:8,padding:"0 2px"}}>SELECT SHIFT{isSat?" — Saturday":""}</div>
-      <div style={{display:"grid",gridTemplateColumns:isSat?"1fr":"repeat(2,1fr)",gap:4,marginBottom:8}}>
-        {presets.map(t=>(
-          <button key={t} onClick={()=>onSelect(t)} style={{padding:"8px 6px",borderRadius:7,border:`1px solid ${currentShift?.t===t?"#3b82f6":"#e2e8f0"}`,background:currentShift?.t===t?"#eff6ff":"#f8fafc",color:currentShift?.t===t?"#1d4ed8":"#374151",fontSize:11,fontWeight:currentShift?.t===t?700:500,cursor:"pointer",textAlign:"center"}}>{t}</button>
-        ))}
-      </div>
+      {isSat ? (
+        <div style={{marginBottom:8}}>{SAT_SHIFTS.map(btn)}</div>
+      ) : (
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:4,marginBottom:8}}>
+          <div>
+            <div style={{fontSize:7,fontWeight:700,color:"#94a3b8",marginBottom:4,textAlign:"center"}}>DAY</div>
+            <div style={{display:"flex",flexDirection:"column",gap:4}}>{DAY_SHIFTS.map(btn)}</div>
+          </div>
+          <div>
+            <div style={{fontSize:7,fontWeight:700,color:"#94a3b8",marginBottom:4,textAlign:"center"}}>EVENING</div>
+            <div style={{display:"flex",flexDirection:"column",gap:4}}>{EVE_SHIFTS.map(btn)}</div>
+          </div>
+        </div>
+      )}
       {!showCustom
         ? <button onClick={()=>setShowCustom(true)} style={{width:"100%",padding:"7px",border:"1px dashed #e2e8f0",borderRadius:7,background:"none",color:"#64748b",fontSize:10,cursor:"pointer"}}>✎ Custom time</button>
         : (
@@ -703,7 +756,8 @@ function ShiftPicker({pos,currentShift,shiftIdx,onSelect,onClose}){
 }
 
 /* ── CONTEXT MENU ───────────────────────────────────────────────── */
-function ContextMenu({pos,currentShift,C,customDayLabels,onAction,onClose}){
+function ContextMenu({pos,currentShift,C,customDayLabels,customTags,onAction,onClose}){
+  const TC = getTagCfg(customTags);
   const [sickHrs,setSickHrs]=useState(String(currentShift?.sh??0));
   const [customLabel,setCustomLabel]=useState(currentShift?.customLabel||customDayLabels?.[0]||"Custom");
   const s={position:"fixed",top:pos.y,left:pos.x,zIndex:8001,background:"#fff",borderRadius:10,boxShadow:"0 8px 32px rgba(0,0,0,0.18)",padding:"6px 0",width:220,border:"1px solid #e2e8f0"};
@@ -737,8 +791,8 @@ function ContextMenu({pos,currentShift,C,customDayLabels,onAction,onClose}){
           );})}
         </div>
         <div style={{fontSize:8,fontWeight:700,color:"#94a3b8",marginBottom:5}}>TAGS</div>
-        {Object.entries(TAG_CFG).map(([k,{l,c,bg}])=>{const active=currentShift?.tg?.includes(k); return(
-          <button key={k} onClick={()=>onAction("TAG",k)} style={{display:"block",width:"100%",textAlign:"left",padding:"6px 0",border:"none",background:"none",color:c,fontSize:10,cursor:"pointer",fontWeight:active?700:400}}>{l}{active?" ✓":""}</button>
+        {Object.entries(TC).filter(([k])=>k!=="REQ").map(([k,{l,c,bg}])=>{const active=currentShift?.tg?.includes(k); return(
+          <button key={k} onClick={()=>onAction("TAG",k)} style={{display:"block",width:"100%",textAlign:"left",padding:"5px 0",border:"none",background:"none",color:c,fontSize:10,cursor:"pointer",fontWeight:active?700:400}}>{l}{active?" ✓":""}</button>
         );})}
       </div>
       <div style={{borderTop:"1px solid #f1f5f9",paddingTop:4,marginTop:2}}>
@@ -752,7 +806,7 @@ function ContextMenu({pos,currentShift,C,customDayLabels,onAction,onClose}){
 const hrsColor = (tot,gc) => tot>=36?gc.acc:tot>=30?"#d97706":"#ef4444";
 
 /* ── HORIZONTAL SCHEDULE GRID ───────────────────────────────────── */
-function HorizSchedule({weeks,isAdmin,C,staffPins,staffUnlocked,swapRequesterInfo,swapRequests,customDayLabels,
+function HorizSchedule({weeks,isAdmin,C,staffPins,staffUnlocked,swapRequesterInfo,swapRequests,customDayLabels,customTags,
   onTap,onLong,onCtxMenu,onHrs,onSickHrs,onArchive,onApprove,onDeny,onApproveSwap,onDenySwap,onSwapRequest,
   onWeekNoteChange}){
   const today = todayStr();
@@ -853,7 +907,7 @@ function HorizSchedule({weeks,isAdmin,C,staffPins,staffUnlocked,swapRequesterInf
                             group={grp} isAdmin={isAdmin}
                             canSwap={canSwap}
                             isToday={isT}
-                            C={C||DEF_COLORS} customDayLabels={customDayLabels}
+                            C={C||DEF_COLORS} customDayLabels={customDayLabels} customTags={customTags}
                             onTap={rect=>onTap&&onTap({weekId:week.id,group:grp,empIdx,shiftIdx:si,rect,isMaster:false,keepTags:s?.tg||[]})}
                             onLong={(x,y)=>onLong&&onLong({weekId:week.id,group:grp,empIdx,shiftIdx:si,x,y,isMaster:false})}
                             onCtxMenu={(x,y)=>onCtxMenu&&onCtxMenu({weekId:week.id,group:grp,empIdx,shiftIdx:si,x,y,isMaster:false})}
@@ -1501,7 +1555,7 @@ function MessagesPage({messages,setMessages,swapRequests,isAdmin,addAudit,curren
 }
 
 /* ── MASTER PAGE ────────────────────────────────────────────────── */
-function MasterPage({masterWeeks,setMasterWeeks,liveWeeks,setLiveWeeks,masterArchived,setMasterArchived,liveArchived,setLiveArchived,masterBackfill,setMasterBackfill,C,onSC,onRC,requests,setRequests,addAudit,pwd,pwd2,pushUndo,customDayLabels}){
+function MasterPage({masterWeeks,setMasterWeeks,liveWeeks,setLiveWeeks,masterArchived,setMasterArchived,liveArchived,setLiveArchived,masterBackfill,setMasterBackfill,C,onSC,onRC,requests,setRequests,addAudit,pwd,pwd2,pushUndo,customDayLabels,customTags}){
   const [tab,setTab]=useState("active");
   const [coverModal,setCoverModal]=useState(null);
   const [newEmpModal,setNewEmpModal]=useState(null);
@@ -1726,7 +1780,7 @@ function MasterPage({masterWeeks,setMasterWeeks,liveWeeks,setLiveWeeks,masterArc
                       {emp.shifts.map((s,si)=>{
                         const dt=week.dates?.[si]||""; const isT=dt===todayStr();
                         return(
-                          <ShiftCell key={si} s={s} group={grp} isAdmin={!locked} isToday={isT} C={C||DEF_COLORS} customDayLabels={customDayLabels}
+                          <ShiftCell key={si} s={s} group={grp} isAdmin={!locked} isToday={isT} C={C||DEF_COLORS} customDayLabels={customDayLabels} customTags={customTags}
                             onTap={rect=>!locked&&onSC&&onSC({weekId:week.id,group:grp,empIdx:ei,shiftIdx:si,rect,isMaster:!isBackfill,isBackfill,keepTags:s?.tg||[]})}
                             onLong={(x,y)=>!locked&&onRC&&onRC({weekId:week.id,group:grp,empIdx:ei,shiftIdx:si,x,y,isMaster:!isBackfill,isBackfill})}
                             onCtxMenu={(x,y)=>!locked&&onRC&&onRC({weekId:week.id,group:grp,empIdx:ei,shiftIdx:si,x,y,isMaster:!isBackfill,isBackfill})}
@@ -2191,6 +2245,41 @@ function AuditPage({auditLog,masterWeeks,masterArchived,deletedEmps}){
   );
 }
 
+/* ── CUSTOM TAG ADDER ───────────────────────────────────────────── */
+function CustomTagAdder({onAdd,existing}){
+  const [label,setLabel]=useState("");
+  const [lbl,setLbl]=useState("");
+  const [color,setColor]=useState("#4f46e5");
+  const [bg,setBg]=useState("#ede9fe");
+  const [msg,setMsg]=useState("");
+  const add=()=>{
+    const l=label.trim(); const lb=lbl.trim().toUpperCase().slice(0,4);
+    if(!l||lb.length<2){setMsg("Need a name and 2-4 letter code.");return;}
+    const id="CT_"+lb;
+    if((existing||[]).some(t=>t.id===id||t.lbl===lb)){setMsg("That code is already used.");return;}
+    onAdd({id,label:l,lbl:lb,color,bg,isTag:true});
+    setLabel("");setLbl("");setMsg("✓ Added!");setTimeout(()=>setMsg(""),2000);
+  };
+  return(
+    <div style={{marginTop:10,padding:10,background:"#f8fafc",borderRadius:7,border:"1px dashed #e2e8f0"}}>
+      <div style={{fontSize:9,fontWeight:700,color:"#64748b",marginBottom:8}}>+ ADD NEW TAG</div>
+      <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+        <input value={label} onChange={e=>setLabel(e.target.value)} placeholder="Tag name (e.g. Training)" style={{background:"#fff",border:"1px solid #e2e8f0",borderRadius:6,padding:"6px 8px",fontSize:10,outline:"none",width:140}}/>
+        <input value={lbl} onChange={e=>setLbl(e.target.value.toUpperCase().slice(0,4))} placeholder="Code (e.g. TRN)" style={{background:"#fff",border:"1px solid #e2e8f0",borderRadius:6,padding:"6px 8px",fontSize:10,outline:"none",width:70,letterSpacing:2,fontWeight:700}}/>
+        <div style={{display:"flex",gap:4,alignItems:"center"}}>
+          <span style={{fontSize:9,color:"#94a3b8"}}>Text</span>
+          <input type="color" value={color} onChange={e=>setColor(e.target.value)} style={{width:28,height:26,borderRadius:4,border:"1px solid #e2e8f0",padding:1,cursor:"pointer"}}/>
+          <span style={{fontSize:9,color:"#94a3b8"}}>BG</span>
+          <input type="color" value={bg} onChange={e=>setBg(e.target.value)} style={{width:28,height:26,borderRadius:4,border:"1px solid #e2e8f0",padding:1,cursor:"pointer"}}/>
+        </div>
+        <div style={{padding:"4px 10px",borderRadius:5,background:bg,border:`1px solid ${color}`,fontSize:9,fontWeight:700,color:color}}>{lbl||"???"}  {label||"Preview"}</div>
+        <Btn onClick={add} variant="primary" style={{fontSize:9}}>+ Add</Btn>
+      </div>
+      {msg&&<div style={{fontSize:9,marginTop:6,color:msg.startsWith("✓")?"#15803d":"#dc2626",fontWeight:600}}>{msg}</div>}
+    </div>
+  );
+}
+
 /* ── ADMIN PAGE ─────────────────────────────────────────────────── */
 function AdminPage({C,setC,pwd,setPwd,pwd2,setPwd2,adminName1,setAdminName1,adminName2,setAdminName2,adminPin1,setAdminPin1,adminPin2,setAdminPin2,staffPins,setStaffPins,viewerPins,setViewerPins,lockMs,setLockMs,auditLog,liveWeeks,masterWeeks,liveArchived,masterArchived,requests,messages,swapRequests,onClearAll,deletedEmps,customDayLabels,setCustomDayLabels,cellTypeStyles,setCellTypeStyles,customCellTypes,setCustomCellTypes,setLiveWeeks,setLiveArchived,setMasterWeeks,setMasterArchived,gasPost,loadPinsFromGas}){
   const [adminTab,setAdminTab]=useState("settings");
@@ -2257,7 +2346,7 @@ function AdminPage({C,setC,pwd,setPwd,pwd2,setPwd2,adminName1,setAdminName1,admi
               {LOCK_OPTIONS.map(opt=><button key={opt.ms} onClick={()=>setLockMs(opt.ms)} style={{padding:"7px 14px",borderRadius:7,border:`1px solid ${lockMs===opt.ms?"#3b82f6":"#e2e8f0"}`,background:lockMs===opt.ms?"#eff6ff":"#f8fafc",color:lockMs===opt.ms?"#1d4ed8":"#475569",fontSize:10,cursor:"pointer",fontWeight:lockMs===opt.ms?700:400}}>{opt.label}</button>)}
             </div>
           </div>
-          <div style={{background:"#fff",border:"1px solid #e2e8f0",borderRadius:9,padding:16,boxShadow:"0 1px 3px rgba(0,0,0,0.06)"}}>
+          <div style={{background:"#fff",border:"1px solid #e2e8f0",borderRadius:9,padding:16,marginBottom:12,boxShadow:"0 1px 3px rgba(0,0,0,0.06)"}}>
             <div style={{fontWeight:700,fontSize:12,color:"#475569",marginBottom:8,paddingBottom:8,borderBottom:"1px solid #f1f5f9"}}>⭐ Custom Day Label</div>
             <div style={{display:"flex",gap:8,alignItems:"center"}}>
               <input value={customLabelInput} onChange={e=>setCustomLabelInput(e.target.value)} placeholder="e.g. Stat Holiday" style={{background:"#f8fafc",border:"1px solid #e2e8f0",borderRadius:7,padding:"7px 10px",color:"#1e293b",fontSize:11,outline:"none",width:200}}/>
@@ -2265,14 +2354,23 @@ function AdminPage({C,setC,pwd,setPwd,pwd2,setPwd2,adminName1,setAdminName1,admi
             </div>
             <div style={{marginTop:6,fontSize:8,color:"#94a3b8"}}>Current: <strong>{customDayLabels?.[0]||"Custom"}</strong></div>
           </div>
+          <div style={{background:"#fff",border:"1px solid #e2e8f0",borderRadius:9,padding:16,boxShadow:"0 1px 3px rgba(0,0,0,0.06)"}}>
+            <div style={{fontWeight:700,fontSize:12,color:"#475569",marginBottom:4,paddingBottom:8,borderBottom:"1px solid #f1f5f9"}}>🏷 Custom Tags</div>
+            <div style={{fontSize:9,color:"#94a3b8",marginBottom:10}}>Built-in: ADM, INV, CVR, LTE. Add your own below.</div>
+            {(customCellTypes||[]).filter(t=>t.isTag).map(t=>(
+              <div key={t.id} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 10px",borderRadius:6,background:t.bg||"#f1f5f9",border:`1px solid ${t.color||"#e2e8f0"}`,marginBottom:5}}>
+                <span style={{fontSize:10,fontWeight:700,color:t.color||"#475569",minWidth:36}}>{t.lbl}</span>
+                <span style={{fontSize:11,color:"#1e293b",flex:1}}>{t.label}</span>
+                <Btn onClick={()=>setCustomCellTypes(prev=>prev.filter(x=>x.id!==t.id))} variant="danger" style={{fontSize:8,padding:"2px 6px"}}>Remove</Btn>
+              </div>
+            ))}
+            <CustomTagAdder onAdd={tag=>setCustomCellTypes(prev=>[...(prev||[]),tag])} existing={customCellTypes||[]}/>
+          </div>
         </div>
       )}
 
       {adminTab==="pins"&&(
         <div>
-          <div style={{background:"#eff6ff",border:"1px solid #93c5fd",borderRadius:9,padding:"10px 14px",marginBottom:12,fontSize:10,color:"#1e3a8a"}}>
-            🔒 <strong>Security:</strong> When deployed via Google Apps Script, PINs are stored server-side in the StaffPins sheet — never in the page source. They cannot be inspected through browser DevTools. PINs shown here are decrypted in-memory after admin authentication.
-          </div>
           <div style={{background:"#fff",border:"1px solid #e2e8f0",borderRadius:9,padding:16,marginBottom:12,boxShadow:"0 1px 3px rgba(0,0,0,0.06)"}}>
             <div style={{fontWeight:700,fontSize:12,color:"#475569",marginBottom:10,paddingBottom:8,borderBottom:"1px solid #f1f5f9"}}>👁 View-Only PINs</div>
             {viewerPins.map(v=>(
@@ -3067,7 +3165,7 @@ function App(){
             staffPins={staffPins} staffUnlocked={staffUnlocked}
             swapRequesterInfo={swapRequesterInfo} swapRequests={swapRequests}
             customDayLabels={customDayLabels}
-            onTap={onTapLive} onLong={onLongLive} onCtxMenu={onCtxLive}
+            customTags={(customCellTypes||[]).filter(t=>t.isTag)} onLong={onLongLive} onCtxMenu={onCtxLive}
             onHrs={(wid,g,ei,si,h)=>updLive(wid,g,ei,si,{h})}
             onSickHrs={(wid,g,ei,si,sh)=>updLive(wid,g,ei,si,{sh})}
             onArchive={isAdmin?archiveWeek:null}
@@ -3109,6 +3207,7 @@ function App(){
             requests={requests} setRequests={setRequests}
             addAudit={addAudit} pwd={pwd} pwd2={pwd2}
             pushUndo={pushUndo} customDayLabels={customDayLabels}
+            customTags={(customCellTypes||[]).filter(t=>t.isTag)}
           />
         )}
         {page==="past-sched"&&isAdmin&&(
@@ -3214,7 +3313,7 @@ function App(){
         <ContextMenu
           pos={ctx.pos}
           currentShift={ctxShift}
-          C={C} customDayLabels={customDayLabels}
+          C={C} customDayLabels={customDayLabels} customTags={(customCellTypes||[]).filter(t=>t.isTag)}
           onAction={ctxAction}
           onClose={()=>setCtx(null)}
         />
