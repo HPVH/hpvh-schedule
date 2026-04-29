@@ -21,7 +21,6 @@
   </div>
   <div id="root"></div>
   <script>
-// hooks + full app in one script block to avoid cross-block scope issues
 var useState    = React.useState;
 var useEffect   = React.useEffect;
 var useRef      = React.useRef;
@@ -216,6 +215,28 @@ const getShiftColor = (s, group, C) => {
 };
 
 const maskPin = pin => pin ? pin.replace(/./g,"●") : "";
+
+/* ── ERROR BOUNDARY ─────────────────────────────────────────────── */
+class ErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { hasError: false, error: null }; }
+  static getDerivedStateFromError(error) { return { hasError: true, error }; }
+  componentDidCatch(error, info) { console.error('Render error:', error.stack, info); }
+  render() {
+    if (this.state.hasError) {
+      return React.createElement('div', {
+        style: { padding:24, margin:16, background:'#fee2e2', border:'1px solid #fca5a5',
+                 borderRadius:9, fontFamily:'monospace', fontSize:11, color:'#991b1b' }
+      },
+        React.createElement('strong', null, '⚠ Tab render error — check browser console for details:'),
+        React.createElement('pre', { style:{ marginTop:8, whiteSpace:'pre-wrap', fontSize:10 } },
+          this.state.error ? this.state.error.stack : 'Unknown error'
+        )
+      );
+    }
+    return this.props.children;
+  }
+}
+
 
 /* ── COVERAGE CHECKER ───────────────────────────────────────────── */
 function checkCoverage(week) {
@@ -3111,7 +3132,8 @@ function App(){
           React.createElement(StatsPage, { requests: requests, liveWeeks: liveWeeks, liveArchived: liveArchived, masterWeeks: masterWeeks, masterArchived: masterArchived, masterBackfill: masterBackfill, C: C,})
         )
         , page==="admin"&&isAdmin&&(
-          React.createElement(AdminPage, { C: C, setC: setC, pwd: pwd, setPwd: setPwd, pwd2: pwd2, setPwd2: setPwd2,
+React.createElement(ErrorBoundary, null,
+                    React.createElement(AdminPage, { C: C, setC: setC, pwd: pwd, setPwd: setPwd, pwd2: pwd2, setPwd2: setPwd2,
             adminName1: adminName1, setAdminName1: setAdminName1, adminName2: adminName2, setAdminName2: setAdminName2,
             adminPin1: adminPin1, setAdminPin1: setAdminPin1, adminPin2: adminPin2, setAdminPin2: setAdminPin2,
             staffPins: staffPins, setStaffPins: setStaffPins, viewerPins: viewerPins, setViewerPins: setViewerPins,
@@ -3125,6 +3147,7 @@ function App(){
             setLiveWeeks: setLiveWeeks, setLiveArchived: setLiveArchived,
             setMasterWeeks: setMasterWeeks, setMasterArchived: setMasterArchived,
             gasPost: gasPost, loadPinsFromGas: loadPinsFromGas,}
+          )
           )
         )
         , (["master","past-sched","stats","admin"].includes(page))&&!isAdmin&&(
@@ -3220,17 +3243,16 @@ function App(){
 
 // mount handled externally
 
-// Mount
 try {
   document.getElementById('loading').style.display = 'none';
   var appRoot = ReactDOM.createRoot(document.getElementById('root'));
   appRoot.render(React.createElement(App));
 } catch(e) {
   document.getElementById('loading').innerHTML =
-    '<div style="color:#dc2626;font-family:sans-serif;padding:32px;max-width:600px">' +
-    '<strong>⚠ Error loading app:</strong><br>' +
-    '<pre style="margin-top:8px;font-size:11px;white-space:pre-wrap;background:#fee2e2;padding:12px;border-radius:6px">' +
-    e.stack + '</pre></div>';
+    '<div style="color:#dc2626;font-family:monospace;padding:32px;max-width:700px">' +
+    '<strong>⚠ Startup error:</strong>' +
+    '<pre style="margin-top:8px;font-size:10px;white-space:pre-wrap;background:#fee2e2;padding:12px;border-radius:6px">' +
+    (e.stack||e.message) + '</pre></div>';
   document.getElementById('loading').style.display = 'flex';
   console.error('Mount error:', e);
 }
