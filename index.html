@@ -2523,11 +2523,8 @@ async function gasGet(action) {
   return r.json();
 }
 async function gasPost(body) {
-  const r = await fetch(GAS_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
-  });
+  const encoded = encodeURIComponent(JSON.stringify(body));
+  const r = await fetch(`${GAS_URL}?method=post&body=${encoded}`, { method: "GET" });
   return r.json();
 }
 
