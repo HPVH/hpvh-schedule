@@ -21,7 +21,7 @@
   </div>
   <div id="root"></div>
   <script>
-// ── Single script block: hooks declared once, app code follows ──────
+// hooks + full app in one script block to avoid cross-block scope issues
 var useState    = React.useState;
 var useEffect   = React.useEffect;
 var useRef      = React.useRef;
@@ -40,7 +40,7 @@ window.addEventListener('unhandledrejection', function(e) {
   e.preventDefault(); // Prevent crash
 });
 
- function _optionalChain(ops) { let lastAccessLHS = undefined; let value = ops[0]; let i = 1; while (i < ops.length) { const op = ops[i]; const fn = ops[i + 1]; i += 2; if ((op === 'optionalAccess' || op === 'optionalCall') && value == null) { return undefined; } if (op === 'access' || op === 'optionalAccess') { lastAccessLHS = value; value = fn(value); } else if (op === 'call' || op === 'optionalCall') { value = fn((...args) => value.call(lastAccessLHS, ...args)); lastAccessLHS = undefined; } } return value; }    // hooks available as globals via window scope
+ function _optionalChain(ops) { let lastAccessLHS = undefined; let value = ops[0]; let i = 1; while (i < ops.length) { const op = ops[i]; const fn = ops[i + 1]; i += 2; if ((op === 'optionalAccess' || op === 'optionalCall') && value == null) { return undefined; } if (op === 'access' || op === 'optionalAccess') { lastAccessLHS = value; value = fn(value); } else if (op === 'call' || op === 'optionalCall') { value = fn((...args) => value.call(lastAccessLHS, ...args)); lastAccessLHS = undefined; } } return value; }    // hooks provided as globals by outer script
 
 /* ═══════════════════════════════════════════════════════════════════
    HPVH SCHEDULE — v3.0 GAS Edition
@@ -2715,20 +2715,20 @@ function App(){
     }
   },[isAdmin,page,gasReady]);
   useEffect(()=>{
+    // Only sync staff list from masterWeeks - NEVER prune pins we haven't loaded yet
+    if(!gasReady) return;
     const allNames=new Set();
     masterWeeks.forEach(w=>GROUPS.forEach(g=>(w.groups[g]||[]).forEach(e=>{if(e.name&&e.name.trim().length>2&&e.name!=="New Staff")allNames.add(`${e.name.trim()}||${g}`);})));
     setStaffPins(prev=>{
       const existing=new Set(prev.map(s=>`${s.name}||${s.group}`));
+      // Only ADD new staff - never remove entries that already have pins
       const toAdd=[...allNames].filter(k=>!existing.has(k)).map(k=>{const [name,group]=k.split("||");return{name,group,pin:""};});
+      // Only prune staff that: (a) are no longer in masterWeeks AND (b) have no pin set
       const pruned=prev.filter(s=>allNames.has(`${s.name}||${s.group}`)||s.pin);
+      if(!toAdd.length&&pruned.length===prev.length) return prev; // no change
       return toAdd.length?[...pruned,...toAdd]:pruned;
     });
-    setDeletedEmps(prev=>{
-      const existingDelKeys=new Set(prev.map(d=>`${d.name}||${d.group}`));
-      const newlyDeleted=staffPins.filter(s=>s.pin&&!allNames.has(`${s.name}||${s.group}`)&&!existingDelKeys.has(`${s.name}||${s.group}`)).map(s=>({name:s.name,group:s.group,deleted:true}));
-      return newlyDeleted.length?[...prev,...newlyDeleted]:prev;
-    });
-  },[masterWeeks]);
+  },[masterWeeks, gasReady]);
 
   // ── Auto-lock ───────────────────────────────────────────────────
   useEffect(()=>{
@@ -3220,16 +3220,17 @@ function App(){
 
 // mount handled externally
 
-// ── Mount ────────────────────────────────────────────────────────────
+// Mount
 try {
   document.getElementById('loading').style.display = 'none';
   var appRoot = ReactDOM.createRoot(document.getElementById('root'));
   appRoot.render(React.createElement(App));
 } catch(e) {
   document.getElementById('loading').innerHTML =
-    '<div style="color:#dc2626;font-family:sans-serif;padding:32px;max-width:500px">' +
-    '<strong>Error loading app:</strong><br><pre style="margin-top:8px;font-size:11px;white-space:pre-wrap">' +
-    e.message + '</pre></div>';
+    '<div style="color:#dc2626;font-family:sans-serif;padding:32px;max-width:600px">' +
+    '<strong>⚠ Error loading app:</strong><br>' +
+    '<pre style="margin-top:8px;font-size:11px;white-space:pre-wrap;background:#fee2e2;padding:12px;border-radius:6px">' +
+    e.stack + '</pre></div>';
   document.getElementById('loading').style.display = 'flex';
   console.error('Mount error:', e);
 }
